@@ -429,8 +429,19 @@ IMPORTANT: No publishNotReadyAddresses (defaults to false)
 
 ## Deployment
 
+## Prerequisites
+
 ```bash
-# Prerequisites: minikube running, kubectl configured
+# Start a 2-node minikube cluster with sufficient resources
+minikube start --nodes=2 --cpus=6 --memory=10gb
+
+# Verify
+kubectl get nodes
+```
+
+## Deployment
+
+```bash
 ./deploy.sh
 ```
 
