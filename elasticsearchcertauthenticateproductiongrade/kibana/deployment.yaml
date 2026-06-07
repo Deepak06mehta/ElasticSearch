@@ -1,0 +1,54 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kibana
+  namespace: elk
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kibana
+  template:
+    metadata:
+      labels:
+        app: kibana
+    spec:
+      nodeSelector:
+        node-role.kubernetes.io/ingest: "true"
+      volumes:
+        - name: elastic-certs
+          secret:
+            secretName: elastic-certs
+            items:
+              - key: ca.crt
+                path: ca.crt
+      containers:
+        - name: kibana
+          image: docker.elastic.co/kibana/kibana:8.17.0
+          ports:
+            - containerPort: 5601
+          env:
+            - name: SERVERNAME
+              value: kibana
+            - name: ELASTICSEARCH_HOSTS
+              value: "https://elasticsearch:9200"
+            - name: ELASTICSEARCH_USERNAME
+              value: "kibana_system"
+            - name: ELASTICSEARCH_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: elastic-credentials
+                  key: kibana-password
+            - name: ELASTICSEARCH_SSL_CERTIFICATEAUTHORITIES
+              value: config/certs/ca.crt
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "150m"
+            limits:
+              memory: "1Gi"
+              cpu: "300m"
+          volumeMounts:
+            - name: elastic-certs
+              mountPath: /usr/share/kibana/config/certs
+              readOnly: true

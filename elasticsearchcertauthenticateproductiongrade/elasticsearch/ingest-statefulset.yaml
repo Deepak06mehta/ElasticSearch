@@ -1,0 +1,143 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: es-ingest
+  namespace: elk
+spec:
+  serviceName: es-ingest
+  replicas: 1
+  selector:
+    matchLabels:
+      app: elasticsearch
+      role: ingest
+  template:
+    metadata:
+      labels:
+        app: elasticsearch
+        role: ingest
+    spec:
+      nodeSelector:
+        node-role.kubernetes.io/ingest: "true"
+      securityContext:
+        fsGroup: 1000
+      initContainers:
+        - name: prepare-certs
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              cp /certs/ca.crt /es-certs/ca.crt
+              cp /certs/tls.crt /es-certs/es.crt
+              cp /certs/tls.key /es-certs/es.key
+              chmod 640 /es-certs/*
+              chown 1000:0 /es-certs/*
+          volumeMounts:
+            - name: elastic-certs
+              mountPath: /certs
+            - name: es-certs-dir
+              mountPath: /es-certs
+      containers:
+        - name: elasticsearch
+          image: docker.elastic.co/elasticsearch/elasticsearch:8.17.0
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 0
+          ports:
+            - containerPort: 9200
+            - containerPort: 9300
+          env:
+            - name: node.name
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: cluster.name
+              valueFrom:
+                configMapKeyRef:
+                  name: elasticsearch-config
+                  key: cluster.name
+            - name: node.roles
+              value: "ingest"
+            - name: discovery.seed_hosts
+              value: "es-master-data-0.es-master-data"
+            - name: network.publish_host
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: ELASTIC_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: elastic-credentials
+                  key: elastic-password
+            - name: ES_JAVA_OPTS
+              value: "-Xms256m -Xmx256m -XX:+AlwaysPreTouch"
+            - name: xpack.security.enabled
+              value: "true"
+            - name: xpack.license.self_generated.type
+              value: "basic"
+            - name: xpack.security.http.ssl.enabled
+              value: "true"
+            - name: xpack.security.http.ssl.key
+              value: /usr/share/elasticsearch/config/certs/es.key
+            - name: xpack.security.http.ssl.certificate
+              value: /usr/share/elasticsearch/config/certs/es.crt
+            - name: xpack.security.http.ssl.certificate_authorities
+              value: /usr/share/elasticsearch/config/certs/ca.crt
+            - name: xpack.security.http.ssl.verification_mode
+              value: certificate
+            - name: xpack.security.transport.ssl.enabled
+              value: "true"
+            - name: xpack.security.transport.ssl.key
+              value: /usr/share/elasticsearch/config/certs/es.key
+            - name: xpack.security.transport.ssl.certificate
+              value: /usr/share/elasticsearch/config/certs/es.crt
+            - name: xpack.security.transport.ssl.certificate_authorities
+              value: /usr/share/elasticsearch/config/certs/ca.crt
+            - name: xpack.security.transport.ssl.verification_mode
+              value: certificate
+            - name: xpack.security.transport.ssl.client_authentication
+              value: "required"
+            - name: xpack.ml.enabled
+              value: "false"
+            - name: xpack.watcher.enabled
+              value: "false"
+            - name: xpack.monitoring.collection.enabled
+              value: "false"
+            - name: xpack.profiling.enabled
+              value: "false"
+          readinessProbe:
+            exec:
+              command:
+                - bash
+                - -c
+                - curl -sk https://localhost:9200 -o /dev/null -w "%{http_code}" | grep -q "401"
+            initialDelaySeconds: 15
+            periodSeconds: 5
+            failureThreshold: 60
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "150m"
+            limits:
+              memory: "1Gi"
+              cpu: "300m"
+          volumeMounts:
+            - name: es-certs-dir
+              mountPath: /usr/share/elasticsearch/config/certs
+      terminationGracePeriodSeconds: 60
+      volumes:
+        - name: elastic-certs
+          secret:
+            secretName: elastic-certs
+            defaultMode: 0600
+        - name: es-certs-dir
+          emptyDir: {}
+  volumeClaimTemplates:
+    - metadata:
+        name: elasticsearch-data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 1Gi

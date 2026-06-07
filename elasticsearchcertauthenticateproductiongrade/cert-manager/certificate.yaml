@@ -1,0 +1,26 @@
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: es-node
+  namespace: elk
+spec:
+  secretName: elastic-certs
+  privateKey:
+    algorithm: RSA
+    size: 2048
+  commonName: elasticsearch
+  dnsNames:
+    - elasticsearch
+    - elasticsearch.elk.svc.cluster.local
+    - "*.elasticsearch"
+    - "*.elasticsearch.elk.svc.cluster.local"
+    - es-master-data-0.es-master-data
+    - es-master-data-0.es-master-data.elk.svc.cluster.local
+    - es-ingest-0.es-ingest
+    - es-ingest-0.es-ingest.elk.svc.cluster.local
+    - localhost
+  ipAddresses:
+    - 127.0.0.1
+  issuerRef:
+    name: es-ca-issuer
+    kind: ClusterIssuer

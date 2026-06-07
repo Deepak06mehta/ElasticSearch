@@ -1,0 +1,87 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: configure-vault
+  namespace: elk
+spec:
+  template:
+    spec:
+      serviceAccountName: vault-config
+      restartPolicy: OnFailure
+      containers:
+        - name: vault-config
+          image: hashicorp/vault:1.18.0
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -e
+
+              export VAULT_ADDR=http://vault:8200
+              export VAULT_TOKEN=root
+
+              echo "Waiting for Vault to be ready..."
+              until vault status > /dev/null 2>&1; do
+                sleep 2
+              done
+              echo "Vault is ready"
+
+              # Enable KV v2 secrets engine at secret/
+              vault secrets enable -path=secret kv-v2 2>/dev/null || true
+
+              # Store elastic and kibana passwords
+              vault kv put secret/elasticsearch \
+                elastic-password=elastic123 \
+                kibana-password=kibana123
+
+              echo "Secrets written to Vault"
+
+              # Enable Kubernetes auth
+              vault auth enable kubernetes 2>/dev/null || true
+
+              # Configure Kubernetes auth
+              KUBE_HOST=$(kubectl get svc kubernetes -n default -o jsonpath='{.spec.clusterIP}')
+              vault write auth/kubernetes/config \
+                kubernetes_host="https://${KUBE_HOST}:443" \
+                token_reviewer_jwt="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)" \
+                kubernetes_ca_cert="$(cat /var/run/secrets/kubernetes.io/serviceaccount/ca.crt)" \
+                disable_local_ca_jwt=true
+
+              # Create ESO role with read access to secret/elasticsearch
+              vault write auth/kubernetes/role/external-secrets \
+                bound_service_account_names=external-secrets \
+                bound_service_account_namespaces=external-secrets \
+                policies=eso-es-policy \
+                ttl=1h
+
+              # Create policy for ESO
+              vault policy write eso-es-policy - <<'EOF'
+              path "secret/data/elasticsearch" {
+                capabilities = ["read"]
+              }
+              EOF
+
+              echo "Vault configured successfully"
+          env:
+            - name: VAULT_ADDR
+              value: http://vault:8200
+            - name: VAULT_TOKEN
+              value: root
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: vault-config
+  namespace: elk
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: vault-config
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: view
+subjects:
+  - kind: ServiceAccount
+    name: vault-config
+    namespace: elk
