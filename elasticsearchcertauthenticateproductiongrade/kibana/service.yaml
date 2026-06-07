@@ -1,9 +1,41 @@
+# =============================================================================
+# service.yaml — Kibana NodePort Service
+# =============================================================================
+# Purpose: Exposes Kibana outside the Kubernetes cluster so you can access
+# it from your MacBook's browser.
+#
+# SERVICE TYPE: NodePort
+#   NodePort opens a high-numbered port (30000-32767) on EVERY Kubernetes
+#   node. Traffic to <NodeIP>:<NodePort> is forwarded to the Kibana pod on
+#   port 5601.
+#
+# HOW TO ACCESS KIBANA:
+#   Option 1: kubectl port-forward
+#     kubectl port-forward -n elk svc/kibana 5601:5601
+#     → http://localhost:5601 (tunnel through kubectl)
+#
+#   Option 2: minikube service
+#     minikube service kibana -n elk --url
+#     → http://<ip>:<node-port> (starts a tunnel on Docker/Podman drivers)
+#
+#   Option 3: NodePort directly
+#     kubectl get svc -n elk kibana → get the NodePort
+#     Open http://<minikube-ip>:<NodePort> in browser
+#
+# WHY NOT LOADBALANCER OR INGRESS?
+#   - LoadBalancer doesn't work with minikube by default (no cloud LB)
+#   - Ingress requires an ingress controller (minikube addons enable ingress)
+#   - NodePort is the simplest option for local dev — no extra components
+# =============================================================================
+
 apiVersion: v1
 kind: Service
 metadata:
   name: kibana
   namespace: elk
 spec:
+  # type: NodePort exposes this service on a high port on each node.
+  # Kubernetes automatically assigns a port in range 30000-32767.
   type: NodePort
   selector:
     app: kibana

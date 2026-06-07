@@ -1,9 +1,50 @@
+# =============================================================================
+# headless-service.yaml — Elasticsearch Service Discovery
+# =============================================================================
+# Purpose: Defines three headless (ClusterIP: None) services that enable
+# DNS-based pod discovery for the Elasticsearch cluster.
+#
+# WHAT IS A HEADLESS SERVICE?
+# A normal Kubernetes Service (ClusterIP) acts as a load balancer — it
+# provides a virtual IP that distributes traffic across pods. A headless
+# service (clusterIP: None) does NOT provide a virtual IP. Instead, it
+# creates DNS A/AAAA records for each pod IP directly.
+#
+# WHY DOES ELASTICSEARCH NEED HEADLESS SERVICES?
+# Elasticsearch uses DNS for peer discovery:
+#   1. The master-data StatefulSet has serviceName: es-master-data
+#   2. Kubernetes creates DNS records like:
+#        es-master-data-0.es-master-data.elk.svc.cluster.local → pod IP
+#   3. Each ES node sets discovery.seed_hosts to these DNS names
+#   4. ES nodes resolve these names to find each other's IPs
+#
+# THE THREE SERVICES:
+#   1. es-master-data (headless) — for master-data pod discovery
+#      DNS: es-master-data-0.es-master-data.elk.svc.cluster.local
+#   2. es-ingest (headless) — for ingest pod discovery
+#      DNS: es-ingest-0.es-ingest.elk.svc.cluster.local
+#   3. elasticsearch (headless) — generic service matching ALL ES pods
+#      Used by: Kibana (ELASTICSEARCH_HOSTS), set-kibana-password job
+#      DNS: elasticsearch.elk.svc.cluster.local (resolves to all pod IPs)
+# =============================================================================
+
+---
+# ---------------------------------------------------------------------------
+# Headless Service: es-master-data
+# ---------------------------------------------------------------------------
+# Bound to the es-master-data StatefulSet via spec.serviceName.
+# DNS records created:
+#   es-master-data-0.es-master-data → IP of pod-0
+#   es-master-data-1.es-master-data → IP of pod-1 (if replicas > 1)
+#   es-master-data.es-master-data   → list of ALL pod IPs (SRV records)
+# ---------------------------------------------------------------------------
 apiVersion: v1
 kind: Service
 metadata:
   name: es-master-data
   namespace: elk
 spec:
+  # clusterIP: None makes this a headless service — no load balancer IP.
   clusterIP: None
   selector:
     app: elasticsearch
@@ -13,7 +54,16 @@ spec:
       port: 9200
     - name: transport
       port: 9300
+
 ---
+# ---------------------------------------------------------------------------
+# Headless Service: es-ingest
+# ---------------------------------------------------------------------------
+# Bound to the es-ingest StatefulSet via spec.serviceName.
+# DNS records created:
+#   es-ingest-0.es-ingest → IP of pod-0
+#   es-ingest.es-ingest  → list of ALL ingest pod IPs
+# ---------------------------------------------------------------------------
 apiVersion: v1
 kind: Service
 metadata:
@@ -29,7 +79,16 @@ spec:
       port: 9200
     - name: transport
       port: 9300
+
 ---
+# ---------------------------------------------------------------------------
+# Headless Service: elasticsearch (unified)
+# ---------------------------------------------------------------------------
+# Matches ALL Elasticsearch pods regardless of role. This is useful for:
+#   - Kibana (can connect to any ES pod)
+#   - Jobs like set-kibana-password (can reach ES via single DNS name)
+#   - External clients that don't care about node roles
+# ---------------------------------------------------------------------------
 apiVersion: v1
 kind: Service
 metadata:

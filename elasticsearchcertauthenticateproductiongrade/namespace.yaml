@@ -1,3 +1,25 @@
+# =============================================================================
+# namespace.yaml
+# =============================================================================
+# Purpose: Creates the 'elk' namespace that will hold ALL Elastic Stack
+# resources (Elasticsearch, Kibana, Vault, cert-manager Certificate, Jobs).
+#
+# Kubernetes namespaces provide:
+#   - Logical isolation: resources in 'elk' cannot see resources in other
+#     namespaces unless explicitly allowed via NetworkPolicies or DNS.
+#   - DNS scoping: services are reachable as <service>.<namespace>.svc.cluster.local
+#     e.g. elasticsearch.elk.svc.cluster.local
+#   - Resource quotas: (optional) limit total CPU/RAM per namespace.
+#
+# This namespace is the home for:
+#   - elasticsearch (master-data + ingest statefulsets)
+#   - kibana (deployment)
+#   - vault (helm release + pod)
+#   - TLS certificates (es-node Certificate → elastic-certs Secret)
+#   - elasticsearch credentials (elastic-credentials Secret from ESO)
+#   - Jobs: configure-vault, set-kibana-password
+# =============================================================================
+
 apiVersion: v1
 kind: Namespace
 metadata:

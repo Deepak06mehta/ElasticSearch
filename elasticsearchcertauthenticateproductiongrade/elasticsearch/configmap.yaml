@@ -1,7 +1,44 @@
+# =============================================================================
+# configmap.yaml — Elasticsearch Cluster Configuration
+# =============================================================================
+# Purpose: Provides shared cluster-wide configuration values to ALL
+# Elasticsearch nodes via a Kubernetes ConfigMap.
+#
+# ConfigMaps are Kubernetes resources that store non-confidential data
+# as key-value pairs. Pods consume them as environment variables or
+# mounted files. We use environment variables (via configMapKeyRef) in
+# the StatefulSet specs.
+#
+# Why use a ConfigMap instead of hardcoding values in the StatefulSet?
+#   1. Single source of truth — change the cluster name once, all nodes
+#      pick it up on restart.
+#   2. Separation of concerns — the StatefulSet template stays generic.
+#   3. Easy to add more config keys later without touching multiple files.
+#
+# What goes in a ConfigMap vs what goes in environment variables?
+#   ConfigMap: cluster-wide settings that ALL nodes share (cluster.name)
+#   Env vars:  node-specific settings (node.roles, heap size, SSL paths)
+#
+# Currently this ConfigMap only has cluster.name. In a production setup
+# you might add: discovery.zen.ping.unicast.hosts, network.host, etc.
+# But we set those via env vars in the StatefulSet for clarity.
+# =============================================================================
+
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: elasticsearch-config
   namespace: elk
 data:
+  # cluster.name: All nodes must share the SAME cluster name to form a
+  # cluster. Elasticsearch refuses to join nodes with different cluster
+  # names (they would be isolated clusters).
+  #
+  # This value is consumed by each pod via:
+  #   env:
+  #     - name: cluster.name
+  #       valueFrom:
+  #         configMapKeyRef:
+  #           name: elasticsearch-config
+  #           key: cluster.name
   cluster.name: production-es

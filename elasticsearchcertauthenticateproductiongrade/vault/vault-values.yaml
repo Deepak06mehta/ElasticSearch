@@ -1,18 +1,61 @@
+# =============================================================================
+# vault-values.yaml — Helm values for HashiCorp Vault (Development Mode)
+# =============================================================================
+# Purpose: Configures Vault to run in development mode with minimal resources.
+#
+# VAULT ARCHITECTURE:
+#   Vault runs as a single pod (vault-0) in the 'elk' namespace.
+#   It provides:
+#     1. Secrets storage — KV v2 engine at path "secret/" stores
+#        elasticsearch passwords (elastic-password, kibana-password)
+#     2. Authentication — Kubernetes auth method validates service account
+#        tokens from External Secrets Operator
+#     3. Authorization — Policies control which paths ESO can read
+#
+# NETWORK COMMUNICATION:
+#   Other pods connect to Vault at: http://vault.elk.svc:8200
+#   - External Secrets Operator (external-secrets namespace) connects via
+#     ClusterSecretStore to read secrets
+#   - configure-vault Job connects to set up secrets and auth config
+#
+# DEV MODE LIMITATIONS:
+#   - Vault is automatically unsealed (no unseal process needed)
+#   - All data is stored in memory, NOT on disk (dataStorage.enabled: false)
+#   - Data is lost on pod restart (acceptable for dev/testing)
+#   - Root token is hardcoded to "root" (NEVER do this in production)
+#   - TLS is disabled (HTTP not HTTPS) — production uses Vault's PKI or
+#     cert-manager for Vault TLS
+# =============================================================================
+
 global:
   enabled: true
+
 server:
+  # Development mode: single node, auto-unsealed, in-memory storage
   dev:
     enabled: true
+    # devRootToken: The root token that can do ANYTHING in Vault.
+    # WARNING: Never use "root" in production. This is a convenience for
+    # dev setups where simplicity matters more than security.
     devRootToken: root
+
+  # dataStorage.enabled: false means Vault stores data in memory only.
+  # No PVC is created. Data disappears when the pod restarts.
   dataStorage:
     enabled: false
+
+  # standalone mode (not HA) — sufficient for dev
   standalone:
     enabled: true
   ha:
     enabled: false
+
   service:
     enabled: true
+    # ClusterIP (internal only) — Vault is NOT exposed outside the cluster
     type: ClusterIP
+
+  # Resource limits — Vault in dev mode is lightweight (~100-150 MB RSS)
   resources:
     requests:
       memory: 128Mi
@@ -20,5 +63,9 @@ server:
     limits:
       memory: 256Mi
       cpu: 100m
+
+# Vault Agent Injector: Disabled because we use External Secrets Operator
+# instead. The injector is a sidecar that injects secrets into pods —
+# ESO is a more Kubernetes-native approach.
 injector:
   enabled: false

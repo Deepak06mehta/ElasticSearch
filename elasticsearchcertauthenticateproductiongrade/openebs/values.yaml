@@ -1,0 +1,76 @@
+# =============================================================================
+# values.yaml — OpenEBS Helm Chart Values (Minimal LocalPV Only)
+# =============================================================================
+# Purpose: Installs ONLY the OpenEBS LocalPV provisioner with minimal
+# resources. Disables NDM (Node Disk Manager) and NDM Operator.
+#
+# WHAT IS OPENEBS LOCALPV?
+#   OpenEBS LocalPV creates Kubernetes PersistentVolumes using the host
+#   node's local filesystem. Each PVC gets a directory on the node:
+#     /var/openebs/local/<pv-name>/
+#   The pod reads/writes directly to this directory — NO network storage,
+#   no iSCSI, no NFS. This is the fastest possible storage for Kubernetes.
+#
+# WHY LOCALPV AND NOT LONGHORN?
+#   Longhorn requires open-iscsi on the host nodes. Minikube (Docker/Podman
+#   driver) does not have open-iscsi installed, and installing it requires
+#   sudo (which is interactive). OpenEBS LocalPV has zero kernel dependencies
+#   — it just creates directories on the host.
+#
+# STORAGE CLASS: openebs-hostpath
+#   - Provisioner: openebs.io/local
+#   - Volume Binding Mode: WaitForFirstConsumer
+#     The PVC is NOT bound until a pod that needs it is scheduled. When the
+#     pod is scheduled, the PV is created on the SAME node as the pod.
+#     This guarantees data locality — the pod and its data are always on the
+#     same node.
+#   - Reclaim Policy: Delete
+#     When the PVC is deleted, the PV and its data directory are deleted.
+#
+# DISABLED COMPONENTS:
+#   - NDM (Node Disk Manager): Discovers block devices on nodes. Not needed
+#     for LocalPV (hostPath) since we don't manage raw block devices.
+#   - NDM Operator: Manages NDM daemonsets. Not needed if NDM is disabled.
+#   - cStor, Jiva: Replicated storage engines. Heavy and not needed for dev.
+#
+# RESOURCE FOOTPRINT:
+#   OpenEBS LocalPV provisioner uses only ~12-15 Mi RAM.
+#   NDM Operator (if enabled) uses ~9 Mi but we don't need it.
+#   Total: 15-20 Mi for the entire storage layer.
+# =============================================================================
+
+# openebs-localpv: Master switch for the LocalPV sub-chart
+openebs-localpv:
+  enabled: true
+
+# localpv: Detailed LocalPV configuration
+localpv:
+  enabled: true
+  # storageClassResourceName: The name of the StorageClass to create.
+  # This must match the storageClassName in the StatefulSet volumeClaimTemplates.
+  storageClassResourceName: openebs-hostpath
+  # basePath: The directory on the host node where PV data is stored.
+  # /var/openebs/local/ is the default.
+  basePath: /var/openebs/local
+  # provisioner: Resource limits for the LocalPV provisioner pod.
+  # 32Mi/64Mi is sufficient — LocalPV is very lightweight.
+  provisioner:
+    resources:
+      requests:
+        memory: 32Mi
+        cpu: 25m
+      limits:
+        memory: 64Mi
+        cpu: 50m
+
+# openebs-ndm: Disable NDM — we don't need disk discovery for hostPath volumes
+openebs-ndm:
+  enabled: false
+
+# ndm: Alternative NDM config key
+ndm:
+  enabled: false
+
+# openebs-ndm-operator: Disable the NDM operator (manages NDM daemonsets)
+openebs-ndm-operator:
+  enabled: false

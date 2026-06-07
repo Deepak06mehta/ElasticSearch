@@ -1,9 +1,48 @@
+# =============================================================================
+# ingest-statefulset.yaml — Elasticsearch Ingest Node
+# =============================================================================
+# Purpose: Defines the Elasticsearch node with the "ingest" role only.
+# Ingest nodes pre-process documents before indexing — they run ingest
+# pipelines (e.g. parsing logs, enriching data, removing fields).
+#
+# ARCHITECTURE RATIONALE:
+# We separate ingest from master+data for two reasons:
+#   1. Resource isolation — ingest processing is CPU-intensive and could
+#      slow down cluster coordination if it ran on the master node.
+#   2. Node affinity — ingest runs on Node 2 (minikube-m02), spreading
+#      the load away from the control-plane and master-data nodes.
+#
+# DIFFERENCES FROM MASTER-DATA STATEFULSET:
+#   - Roles: "ingest" only (no master, no data)
+#   - No fix-permissions init container (ingest stores state in memory/disk
+#     but does NOT hold data shards — PVC is only for node metadata)
+#   - Smaller heap: 384m (vs 256m on master-data)
+#   - No AlwaysPreTouch (pre-committing heap on a 384m heap wastes RAM)
+#   - Runs on minikube-m02 (ingest=true label)
+#   - Data path: still has a PVC for node state + ingestion queue buffers
+#   - NO persistent shards — if this pod dies, no data loss
+#
+# COMMUNICATION:
+#   Internal (Transport):
+#     - discovery.seed_hosts: "es-master-data-0.es-master-data"
+#     - Resolves via headless service DNS (cross-node via Calico/CNI overlay)
+#     - Connects to master over port 9300 with mutual TLS
+#     - Sends join request → master accepts → receives cluster state
+#
+#   External (HTTP):
+#     - Clients send documents to http(s)://es-ingest:9200/_bulk or _ingest
+#     - Ingest processes pipelines, then forwards to master-data for indexing
+#     - Headless service "es-ingest" resolves to this pod's IP
+# =============================================================================
+
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
   name: es-ingest
   namespace: elk
 spec:
+  # serviceName: Links to the es-ingest headless service for DNS discovery.
+  # Pod DNS: es-ingest-0.es-ingest.elk.svc.cluster.local
   serviceName: es-ingest
   replicas: 1
   selector:
@@ -16,10 +55,25 @@ spec:
         app: elasticsearch
         role: ingest
     spec:
+      # nodeSelector: Forces this pod to run on the ingest-labeled node
+      # (minikube-m02). This separation keeps CPU-heavy ingest processing
+      # away from the master-data and control-plane nodes.
       nodeSelector:
         node-role.kubernetes.io/ingest: "true"
+
       securityContext:
         fsGroup: 1000
+
+      # -----------------------------------------------------------------------
+      # Init Container: prepare-certs
+      # -----------------------------------------------------------------------
+      # Same cert-copy logic as master-data. Copies TLS certs from the
+      # Secret volume to a shared emptyDir with correct ownership.
+      #
+      # The SAME Secret (elastic-certs) is used for ALL ES nodes. The
+      # certificate has SAN entries for both es-master-data-0.es-master-data
+      # AND es-ingest-0.es-ingest, so it's valid for both.
+      # -----------------------------------------------------------------------
       initContainers:
         - name: prepare-certs
           image: busybox:1.36
@@ -37,6 +91,10 @@ spec:
               mountPath: /certs
             - name: es-certs-dir
               mountPath: /es-certs
+
+      # -----------------------------------------------------------------------
+      # Main Container: elasticsearch
+      # -----------------------------------------------------------------------
       containers:
         - name: elasticsearch
           image: docker.elastic.co/elasticsearch/elasticsearch:8.17.0
@@ -47,30 +105,67 @@ spec:
             - containerPort: 9200
             - containerPort: 9300
           env:
+            # node.name: Automatically set to pod name (es-ingest-0)
             - name: node.name
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.name
+
+            # cluster.name: Must match master-data's cluster name
             - name: cluster.name
               valueFrom:
                 configMapKeyRef:
                   name: elasticsearch-config
                   key: cluster.name
+
+            # node.roles: Only "ingest" — this node does NOT store data
+            # and does NOT participate in master election.
             - name: node.roles
               value: "ingest"
+
+            # discovery.seed_hosts: Points to the master-data node's DNS.
+            # On startup, the ingest node resolves this DNS name to find
+            # the master and sends a join request over transport (port 9300).
             - name: discovery.seed_hosts
               value: "es-master-data-0.es-master-data"
+
+            # network.publish_host: The IP the ingest node advertises to
+            # the master for transport communication. This must be the
+            # pod's routable IP within the cluster network.
             - name: network.publish_host
               valueFrom:
                 fieldRef:
                   fieldPath: status.podIP
+
+            # ELASTIC_PASSWORD: Not strictly needed by ingest (it doesn't
+            # authenticate outbound), but ES auto-configuration sets this
+            # as the elastic user password. We set it from Vault to ensure
+            # consistency across all nodes.
             - name: ELASTIC_PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: elastic-credentials
                   key: elastic-password
+
+            # ES_JAVA_OPTS: JVM heap for ingest node.
+            # -Xms384m -Xmx384m = 384 MB heap (fixed, no dynamic resizing)
+            #
+            # WHY 384m AND NOT 192m LIKE THE ORIGINAL DESIGN?
+            # ES 8.17 with 170+ plugins needs more than 192m. The original
+            # config had 192m which caused GC thrashing:
+            #   "[gc] overhead, spent [1.3s] collecting in the last [1.6s]"
+            # The node spent 80% of its time in GC and never became ready.
+            #
+            # WHY NO AlwaysPreTouch?
+            # AlwaysPreTouch pre-commits all heap pages to physical RAM at
+            # startup. With 384m heap on a 768Mi limit, this leaves only
+            # ~350m for non-heap (direct memory, threads, code cache).
+            # Without AlwaysPreTouch, heap pages are committed lazily,
+            # reducing peak RSS pressure.
             - name: ES_JAVA_OPTS
-              value: "-Xms192m -Xmx192m -XX:+AlwaysPreTouch"
+              value: "-Xms384m -Xmx384m"
+
+            # --- Same TLS settings as master-data ---
             - name: xpack.security.enabled
               value: "true"
             - name: xpack.license.self_generated.type
@@ -97,6 +192,8 @@ spec:
               value: certificate
             - name: xpack.security.transport.ssl.client_authentication
               value: "required"
+
+            # --- Disable unused features ---
             - name: xpack.ml.enabled
               value: "false"
             - name: xpack.watcher.enabled
@@ -105,26 +202,44 @@ spec:
               value: "false"
             - name: xpack.profiling.enabled
               value: "false"
+
+          # -------------------------------------------------------------------
+          # Readiness Probe
+          # -------------------------------------------------------------------
+          # Same logic as master-data — waits for HTTP 401 on localhost:9200.
+          # Generous timeouts because ingest takes 2-3 min to start with 384m heap.
+          # -------------------------------------------------------------------
           readinessProbe:
             exec:
               command:
                 - bash
                 - -c
                 - curl -sk https://localhost:9200 -o /dev/null -w "%{http_code}" | grep -q "401"
-            initialDelaySeconds: 15
-            periodSeconds: 5
-            failureThreshold: 60
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 30
+
+          # -------------------------------------------------------------------
+          # Resource Requests & Limits
+          # -------------------------------------------------------------------
+          # Slightly less than master-data since ingest does not store shards.
+          # But still generous enough to avoid GC thrashing (Issue #8).
+          # -------------------------------------------------------------------
           resources:
             requests:
-              memory: "256Mi"
-              cpu: "100m"
-            limits:
               memory: "512Mi"
-              cpu: "200m"
+              cpu: "150m"
+            limits:
+              memory: "1Gi"
+              cpu: "300m"
+
           volumeMounts:
             - name: es-certs-dir
               mountPath: /usr/share/elasticsearch/config/certs
+
       terminationGracePeriodSeconds: 30
+
       volumes:
         - name: elastic-certs
           secret:
@@ -132,6 +247,19 @@ spec:
             defaultMode: 0600
         - name: es-certs-dir
           emptyDir: {}
+
+  # ---------------------------------------------------------------------------
+  # volumeClaimTemplates: PVC for Ingest Node
+  # ---------------------------------------------------------------------------
+  # Ingest nodes have a data path for:
+  #   - Node state (metadata about the node itself)
+  #   - Ingest queue buffers (temporary storage during processing)
+  #   - Logs if log files are written to the data path
+  #
+  # IMPORTANT: Ingest nodes do NOT hold primary/replica shards. If this PVC
+  # is deleted, no user data is lost. Only the node's identity and some
+  # cached state would need to be recreated.
+  # ---------------------------------------------------------------------------
   volumeClaimTemplates:
     - metadata:
         name: elasticsearch-data
@@ -141,3 +269,4 @@ spec:
         resources:
           requests:
             storage: 1Gi
+        storageClassName: openebs-hostpath

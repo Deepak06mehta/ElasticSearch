@@ -1,3 +1,33 @@
+# =============================================================================
+# deployment.yaml — Kibana Deployment
+# =============================================================================
+# Purpose: Deploys Kibana — the web UI for visualizing Elasticsearch data.
+#
+# KIBANA ARCHITECTURE:
+#   Kibana connects to Elasticsearch as the 'kibana_system' user (not 'elastic').
+#   The kibana_system user has restricted privileges — it can only:
+#     - Read cluster state (for dashboard/index pattern discovery)
+#     - Read/write .kibana* indices (saved objects: dashboards, visualizations)
+#     - Write to .kibana-task-manager indices (background tasks)
+#
+# KIBANA → ES COMMUNICATION FLOW:
+#   Kibana pod → https://elasticsearch:9200 (headless service → any ES pod IP)
+#     ↳ Uses kibana_system / kibana123 for authentication
+#     ↳ Uses CA cert for TLS verification (ELASTICSEARCH_SSL_CERTIFICATEAUTHORITIES)
+#     ↳ Fetches cluster state, index patterns, saved objects
+#
+# NODE PLACEMENT:
+#   Kibana runs on the ingest node (minikube-m02) alongside ES ingest.
+#   This keeps Kibana traffic on the worker node and away from the
+#   control-plane + master-data node.
+#
+# WHY RESTART KIBANA AFTER DEPLOYMENT?
+#   Kibana caches the elasticsearch credentials at startup. If the password
+#   was changed AFTER Kibana started (e.g. by the set-kibana-password job),
+#   Kibana still has the old password. The rollout restart forces it to
+#   re-read the Secret and reconnect with fresh credentials.
+# =============================================================================
+
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -13,42 +43,81 @@ spec:
       labels:
         app: kibana
     spec:
+      # nodeSelector: Runs on the ingest-labeled node (minikube-m02)
+      # alongside the ES ingest pod. This physically separates Kibana
+      # traffic from the master-data node.
       nodeSelector:
         node-role.kubernetes.io/ingest: "true"
+
       volumes:
+        # elastic-certs: Only the CA certificate is needed by Kibana
+        # (it verifies the ES server certificate). Kibana does not need
+        # a client certificate for ES authentication — it uses password auth.
         - name: elastic-certs
           secret:
             secretName: elastic-certs
             items:
               - key: ca.crt
                 path: ca.crt
+
       containers:
         - name: kibana
           image: docker.elastic.co/kibana/kibana:8.17.0
           ports:
             - containerPort: 5601
           env:
+            # SERVERNAME: The hostname Kibana advertises to browsers.
+            # Must match kibana service name for redirect URI validation.
             - name: SERVERNAME
               value: kibana
+
+            # ELASTICSEARCH_HOSTS: The URL of the Elasticsearch cluster.
+            # Uses HTTPS with the headless service DNS name.
+            # DNS resolution flow:
+            #   kibana pod → "elasticsearch" → /etc/resolv.conf → search .elk.svc.cluster.local
+            #   → elasticsearch.elk.svc.cluster.local → resolves to ES pod IP(s)
             - name: ELASTICSEARCH_HOSTS
               value: "https://elasticsearch:9200"
+
+            # ELASTICSEARCH_USERNAME: The username Kibana uses to authenticate.
+            # Must be 'kibana_system' (a built-in Elasticsearch user).
             - name: ELASTICSEARCH_USERNAME
               value: "kibana_system"
+
+            # ELASTICSEARCH_PASSWORD: Retrieved from Vault via ESO.
+            # Password is set by the set-kibana-password job.
             - name: ELASTICSEARCH_PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: elastic-credentials
                   key: kibana-password
+
+            # ELASTICSEARCH_SSL_CERTIFICATEAUTHORITIES: Path to the CA cert
+            # that signed the Elasticsearch node certificate. Kibana uses this
+            # to verify it's connecting to the real ES cluster (not a MITM).
             - name: ELASTICSEARCH_SSL_CERTIFICATEAUTHORITIES
               value: config/certs/ca.crt
+
+          # Resource Requirements:
+          # Kibana 8.17 with 170+ plugins needs at least 1Gi RAM.
+          # The Node.js process (Kibana runs on Node.js) has a default
+          # max heap of ~512m for the V8 engine. The remaining memory is
+          # for the HTTP server, plugins, and system overhead.
+          #
+          # Issue #9: With 512Mi limit, Kibana got:
+          #   "FATAL ERROR: Ineffective mark-compacts near heap limit
+          #    Allocation failed - JavaScript heap out of memory"
+          # due to the Node.js heap + plugin overhead exceeding 512Mi.
           resources:
             requests:
-              memory: "256Mi"
-              cpu: "100m"
-            limits:
               memory: "512Mi"
-              cpu: "200m"
+              cpu: "150m"
+            limits:
+              memory: "1Gi"
+              cpu: "300m"
+
           volumeMounts:
+            # Mount CA cert to config/certs/ca.crt for TLS verification
             - name: elastic-certs
               mountPath: /usr/share/kibana/config/certs
               readOnly: true

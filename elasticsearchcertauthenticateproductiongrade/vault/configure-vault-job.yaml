@@ -1,3 +1,29 @@
+# =============================================================================
+# configure-vault-job.yaml — Vault Initialization Job
+# =============================================================================
+# Purpose: One-time job runs AFTER Vault is deployed to:
+#   1. Enable the KV v2 secrets engine at the "secret/" path
+#   2. Store elasticsearch passwords (elastic-password, kibana-password)
+#   3. Enable the Kubernetes auth method
+#   4. Configure Kubernetes auth to validate tokens from the cluster
+#   5. Create a policy (eso-es-policy) granting read access to secrets
+#   6. Create a role (external-secrets) binding the policy to ESO's SA
+#
+# WHY A JOB AND NOT AN INIT CONTAINER?
+#   A Job runs once and exits. An init container would run on EVERY pod
+#   restart. We only need to configure Vault once after installation.
+#   If the Job fails, you can re-run it with: kubectl delete job && kubectl apply
+#
+# WHAT HAPPENS INSIDE THE JOB:
+#   Step 1: Wait for Vault to be ready (vault status succeeds)
+#   Step 2: vault secrets enable -path=secret kv-v2
+#   Step 3: vault kv put secret/elasticsearch elastic-password=... kibana-password=...
+#   Step 4: vault auth enable kubernetes
+#   Step 5: vault write auth/kubernetes/config kubernetes_host=...
+#   Step 6: vault write auth/kubernetes/role/external-secrets ...
+#   Step 7: vault policy write eso-es-policy ...
+# =============================================================================
+
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -6,6 +32,8 @@ metadata:
 spec:
   template:
     spec:
+      # vault-config ServiceAccount: has RBAC permissions to read cluster
+      # info via the "view" ClusterRole (needed for TokenReview API calls).
       serviceAccountName: vault-config
       restartPolicy: OnFailure
       containers:
@@ -23,44 +51,75 @@ spec:
             - |
               set -e
 
+              # VAULT_ADDR: Points to the Vault service within the cluster.
+              # DNS: http://vault.elk.svc:8200 resolves to vault-0's IP.
               export VAULT_ADDR=http://vault:8200
               export VAULT_TOKEN=root
 
+              # ---- Step 1: Wait for Vault to be ready ----
               echo "Waiting for Vault to be ready..."
               until vault status > /dev/null 2>&1; do
                 sleep 2
               done
               echo "Vault is ready"
 
-              # Enable KV v2 secrets engine at secret/
+              # ---- Step 2: Enable KV v2 secrets engine ----
+              # The -path=secret flag mounts the engine at the "secret/"
+              # path. Vault paths are like filesystem mount points.
+              # /secret/elasticsearch becomes the path for our credentials.
+              # 2>/dev/null || true: Ignore "path already in use" errors
+              # (idempotent — safe to run the job multiple times).
               vault secrets enable -path=secret kv-v2 2>/dev/null || true
 
-              # Store elastic and kibana passwords
+              # ---- Step 3: Store elasticsearch credentials ----
+              # These are the master passwords. They are synced to a k8s
+              # Secret by External Secrets Operator.
               vault kv put secret/elasticsearch \
                 elastic-password=elastic123 \
                 kibana-password=kibana123
 
               echo "Secrets written to Vault"
 
-              # Enable Kubernetes auth
+              # ---- Step 4: Enable Kubernetes auth method ----
+              # This allows Kubernetes service accounts to authenticate
+              # to Vault using their JWT tokens.
               vault auth enable kubernetes 2>/dev/null || true
 
-              # Configure Kubernetes auth
-              KUBE_HOST=$(kubectl get svc kubernetes -n default -o jsonpath='{.spec.clusterIP}')
+              # ---- Step 5: Configure Kubernetes auth ----
+              # Tells Vault how to validate Kubernetes service account tokens.
+              #
+              # kubernetes_host: The full DNS name of the Kubernetes API server.
+              #   Must be the FULL FQDN (kubernetes.default.svc.cluster.local)
+              #   because Vault's DNS resolver needs all 5 domains with ndots:5
+              #   (Issue #2: kubernetes.default.svc with 3 dots fails to resolve).
+              #
+              # disable_local_ca_jwt: false means Vault reads its OWN service
+              #   account JWT from the filesystem to authenticate to the
+              #   Kubernetes TokenReview API. If true, you must supply the
+              #   JWT manually via token_reviewer_jwt. We use false because
+              #   it's simpler and doesn't require managing JWT rotation.
               vault write auth/kubernetes/config \
-                kubernetes_host="https://${KUBE_HOST}:443" \
-                token_reviewer_jwt="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)" \
-                kubernetes_ca_cert="$(cat /var/run/secrets/kubernetes.io/serviceaccount/ca.crt)" \
-                disable_local_ca_jwt=true
+                kubernetes_host="https://kubernetes.default.svc.cluster.local:443" \
+                disable_local_ca_jwt=false
 
-              # Create ESO role with read access to secret/elasticsearch
+              # ---- Step 6: Create role for ESO ----
+              # This role binds External Secrets Operator's service account
+              # to the eso-es-policy. When ESO authenticates with its SA
+              # token, Vault checks:
+              #   1. Is the token valid? (Kubernetes TokenReview API)
+              #   2. Does the SA match bound_service_account_names?
+              #   3. Is the namespace in bound_service_account_namespaces?
+              #   4. If yes → assign the eso-es-policy → allow read access
               vault write auth/kubernetes/role/external-secrets \
                 bound_service_account_names=external-secrets \
                 bound_service_account_namespaces=external-secrets \
                 policies=eso-es-policy \
                 ttl=1h
 
-              # Create policy for ESO
+              # ---- Step 7: Create policy ----
+              # The policy grants READ access to secret/data/elasticsearch.
+              # Note: KV v2 engine requires "data" in the path
+              # (secret/data/elasticsearch, not secret/elasticsearch).
               vault policy write eso-es-policy - <<'EOF'
               path "secret/data/elasticsearch" {
                 capabilities = ["read"]
@@ -73,13 +132,29 @@ spec:
               value: http://vault:8200
             - name: VAULT_TOKEN
               value: root
+
 ---
+# ---------------------------------------------------------------------------
+# ServiceAccount: vault-config
+# ---------------------------------------------------------------------------
+# Dedicated service account for the configure-vault job. It needs RBAC
+# permissions to perform TokenReview calls against the Kubernetes API
+# (via the "view" ClusterRole).
+# ---------------------------------------------------------------------------
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: vault-config
   namespace: elk
+
 ---
+# ---------------------------------------------------------------------------
+# ClusterRoleBinding: vault-config
+# ---------------------------------------------------------------------------
+# Binds the vault-config ServiceAccount to the "view" ClusterRole, which
+# allows reading cluster resources. This is the minimum permission needed
+# for Vault's Kubernetes auth to validate tokens.
+# ---------------------------------------------------------------------------
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:

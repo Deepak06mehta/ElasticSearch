@@ -1,26 +1,88 @@
+# =============================================================================
+# certificate.yaml — Elasticsearch Node TLS Certificate
+# =============================================================================
+# Purpose: Creates the TLS certificate used by ALL Elasticsearch nodes for
+# BOTH HTTP (REST API) and Transport (inter-node cluster communication).
+#
+# This single certificate is shared by:
+#   - es-master-data-0 (master + data roles)
+#   - es-ingest-0      (ingest role)
+#
+# The certificate has Subject Alternative Names (SANs) for:
+#   1. DNS names that clients use to reach Elasticsearch
+#   2. DNS names that nodes use to discover each other (headless service)
+#   3. localhost (for readiness probes and local exec commands)
+#
+# How it is used:
+#   The resulting Secret (elastic-certs) is mounted into each Elasticsearch
+#   pod at /usr/share/elasticsearch/config/certs/ with three files:
+#     - tls.crt → mounted as es.crt (the node certificate)
+#     - tls.key → mounted as es.key (the node private key)
+#     - ca.crt  → mounted as ca.crt (the CA certificate for verification)
+#
+# TLS verification modes:
+#   HTTP:     verification_mode=certificate (validates cert is signed by CA)
+#   Transport: verification_mode=certificate + client_authentication=required
+#              (mutual TLS — both sides present certificates and verify each other)
+# =============================================================================
+
 apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
   name: es-node
+  # This Certificate lives in the 'elk' namespace because that's where
+  # the Elasticsearch pods run and where the resulting Secret is consumed.
   namespace: elk
 spec:
+  # secretName: The Kubernetes Secret that cert-manager will create/update
+  # with the signed certificate and private key. This is the Secret mounted
+  # into Elasticsearch pods.
   secretName: elastic-certs
+
+  # privateKey: Configuration for the node certificate's private key.
+  # RSA 2048 is used here (instead of ECDSA) for maximum compatibility.
+  # Some Elasticsearch features (like PKCS#11 tokens) work better with RSA.
   privateKey:
     algorithm: RSA
     size: 2048
+
+  # commonName: The primary DNS name for this certificate.
   commonName: elasticsearch
+
+  # dnsNames: Subject Alternative Names (SANs) — ALL DNS names that this
+  # certificate is valid for. A TLS client will verify that the hostname
+  # it is connecting to matches one of these SANs.
+  #
+  # Breakdown of each entry:
   dnsNames:
+    # 1. Plain service name (resolves within the same namespace)
     - elasticsearch
+    # 2. Fully qualified DNS name (resolves from ANY namespace)
     - elasticsearch.elk.svc.cluster.local
+    # 3. Wildcard for any pod in the elasticsearch service
     - "*.elasticsearch"
+    # 4. Wildcard FQDN
     - "*.elasticsearch.elk.svc.cluster.local"
+    # 5-6. Headless service DNS for master-data pod discovery
+    #      StatefulSet pods are reachable as:
+    #      <pod-name>.<service-name>.<namespace>.svc.cluster.local
+    #      e.g. es-master-data-0.es-master-data.elk.svc.cluster.local
     - es-master-data-0.es-master-data
     - es-master-data-0.es-master-data.elk.svc.cluster.local
+    # 7-8. Headless service DNS for ingest pod discovery
     - es-ingest-0.es-ingest
     - es-ingest-0.es-ingest.elk.svc.cluster.local
+    # 9. localhost for readiness probes (curl https://localhost:9200)
     - localhost
+
+  # ipAddresses: Additional SANs for IP-based connections. The pod's
+  # readiness probe uses localhost, so we include 127.0.0.1.
   ipAddresses:
     - 127.0.0.1
+
+  # issuerRef: Tells cert-manager to use es-ca-issuer (the CA-based issuer)
+  # to sign this certificate. The CA certificate was bootstrapped in the
+  # previous step (ca-certificate.yaml).
   issuerRef:
     name: es-ca-issuer
     kind: ClusterIssuer

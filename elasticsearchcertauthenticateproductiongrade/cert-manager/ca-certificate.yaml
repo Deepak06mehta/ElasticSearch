@@ -1,0 +1,52 @@
+# =============================================================================
+# ca-certificate.yaml
+# =============================================================================
+# Purpose: Creates the Certificate Authority (CA) certificate that will be
+# used to sign all Elasticsearch node TLS certificates.
+#
+# IMPORTANT: This Certificate MUST be in the 'cert-manager' namespace, NOT
+# in 'elk'. The reason is that the es-ca-issuer ClusterIssuer (defined in
+# cluster-issuer.yaml) references the secret by name, and cert-manager's
+# controllers only look for that secret in their own namespace.
+#
+# Without this (Issue #1 from the README):
+#   The es-ca-issuer fails with:
+#     "secrets 'es-ca-secret' not found"
+#   because the secret was in 'elk' but cert-manager was looking in
+#   'cert-manager'.
+# =============================================================================
+
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: es-ca
+  # CRITICAL: Must be 'cert-manager' namespace so the es-ca-issuer
+  # ClusterIssuer can read the resulting Secret 'es-ca-secret'.
+  namespace: cert-manager
+spec:
+  # isCA: true marks this certificate as a Certificate Authority. The
+  # generated certificate will have the CA basic constraint set to true,
+  # allowing it to sign other certificates (server/leaf certs).
+  isCA: true
+
+  # commonName: A human-readable identifier for this CA. Not used for
+  # TLS validation — only for display purposes.
+  commonName: es-ca
+
+  # secretName: The name of the Kubernetes Secret that will hold the
+  # CA private key and certificate. This is the SAME name referenced by
+  # the es-ca-issuer ClusterIssuer (ca.secretName: es-ca-secret).
+  secretName: es-ca-secret
+
+  # privateKey: Configuration for the CA's private key.
+  # We use ECDSA (Elliptic Curve) with P-256 for the CA because it is
+  # faster and more secure than RSA for signing operations.
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+
+  # issuerRef: Tells cert-manager which Issuer/ClusterIssuer should sign
+  # this certificate. We use the selfsigned-issuer to bootstrap the CA.
+  issuerRef:
+    name: selfsigned-issuer
+    kind: ClusterIssuer

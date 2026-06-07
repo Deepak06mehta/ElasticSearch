@@ -1,9 +1,56 @@
+# =============================================================================
+# master-data-statefulset.yaml — Elasticsearch Master + Data Node
+# =============================================================================
+# Purpose: Defines the Elasticsearch node that acts as BOTH:
+#   1. Master — cluster management, state management, node discovery
+#   2. Data — holds the actual indexed data (shards)
+#
+# This is the most important node in the cluster. Without it:
+#   - No shards can be allocated (no data storage)
+#   - The cluster cannot elect a master (no cluster coordination)
+#   - Indexing/search operations fail
+#
+# WHY A STATEFULSET AND NOT A DEPLOYMENT?
+# StatefulSets provide:
+#   1. Stable network identity — pod always named es-master-data-0
+#   2. Stable storage — each pod gets its OWN PVC that persists across
+#      restarts. The PVC is bound to the same pod forever.
+#   3. Ordered rolling updates — pods are updated one at a time
+#   4. Headless service DNS — each pod gets a unique DNS name
+#
+# Deployments are stateless — pods get random names and share volumes.
+# Elasticsearch needs stable identities for cluster formation.
+#
+# NETWORK COMMUNICATION:
+#   HTTP (port 9200):
+#     - Kibana connects via https://elasticsearch:9200
+#     - Jobs connect via same DNS name
+#     - Readiness probes: curl https://localhost:9200
+#     - Client applications send queries here
+#
+#   Transport (port 9300):
+#     - Inter-node communication (cluster state, shard replication)
+#     - Mutual TLS required (both sides verify certs)
+#     - DNS discovery: es-master-data-0.es-master-data (headless service)
+#
+#   Discovery flow:
+#     1. Pod starts, reads discovery.seed_hosts = "es-master-data-0.es-master-data"
+#     2. Resolves DNS → gets IP of master-data-0 (itself on first start)
+#     3. Master-data-0 bootstraps the cluster with initial_master_nodes
+#     4. Ingest node starts, resolves es-master-data-0.es-master-data → master IP
+#     5. Ingest sends join request over transport (port 9300) with mTLS
+#     6. Master accepts, cluster forms with 2 nodes
+# =============================================================================
+
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
   name: es-master-data
   namespace: elk
 spec:
+  # serviceName: Links this StatefulSet to the headless service. Kubernetes
+  # creates DNS records: <pod-name>.<service-name>.<namespace>.svc.cluster.local
+  # e.g. es-master-data-0.es-master-data.elk.svc.cluster.local
   serviceName: es-master-data
   replicas: 1
   selector:
@@ -16,10 +63,30 @@ spec:
         app: elasticsearch
         role: master-data
     spec:
+      # nodeSelector: Ensures this pod runs ONLY on the node labeled
+      # "node-role.kubernetes.io/master-data=true" (Node 1: minikube).
+      # This enforces the architecture layout where master+data and
+      # ingest run on separate nodes.
       nodeSelector:
         node-role.kubernetes.io/master-data: "true"
+
+      # securityContext: fsGroup=1000 sets the group ownership of mounted
+      # volumes to GID 1000, which matches the elasticsearch user inside
+      # the container. Without this, the ES process (UID 1000) cannot write
+      # to the OpenEBS hostPath volume.
       securityContext:
         fsGroup: 1000
+
+      # -----------------------------------------------------------------------
+      # Init Container 1: fix-permissions
+      # -----------------------------------------------------------------------
+      # Ensures the data directory is owned by UID 1000 (elasticsearch user)
+      # with correct permissions. OpenEBS LocalPV volumes may be created with
+      # root ownership, causing Elasticsearch to fail to write data.
+      #
+      # Init containers run BEFORE the main container and must complete
+      # successfully before the main container starts.
+      # -----------------------------------------------------------------------
       initContainers:
         - name: fix-permissions
           image: busybox:1.36
@@ -34,6 +101,19 @@ spec:
           volumeMounts:
             - name: elasticsearch-data
               mountPath: /usr/share/elasticsearch/data
+
+        # -----------------------------------------------------------------------
+        # Init Container 2: prepare-certs
+        # -----------------------------------------------------------------------
+        # Copies TLS certificates from the Secret volume to the shared
+        # emptyDir volume with correct ownership and permissions.
+        #
+        # Why not mount the Secret directly at the target path?
+        #   Secrets are mounted with UID:GID from the container's securityContext.
+        #   But we need the files to be owned by UID 1000 (elasticsearch user)
+        #   with mode 640 (group-readable). The Secret volume mount doesn't
+        #   support custom ownership. So we copy via an init container.
+        # -----------------------------------------------------------------------
         - name: prepare-certs
           image: busybox:1.36
           command:
@@ -50,6 +130,10 @@ spec:
               mountPath: /certs
             - name: es-certs-dir
               mountPath: /es-certs
+
+      # -----------------------------------------------------------------------
+      # Main Container: elasticsearch
+      # -----------------------------------------------------------------------
       containers:
         - name: elasticsearch
           image: docker.elastic.co/elasticsearch/elasticsearch:8.17.0
@@ -59,37 +143,91 @@ spec:
           ports:
             - containerPort: 9200
             - containerPort: 9300
+
+          # -------------------------------------------------------------------
+          # Environment Variables
+          # -------------------------------------------------------------------
+          # Each env var corresponds to an Elasticsearch setting.
+          # ES reads settings from environment variables during startup.
+          # -------------------------------------------------------------------
           env:
+            # node.name: Set from the pod's metadata.name (e.g. es-master-data-0)
+            # This gives each pod a unique node name for cluster membership.
             - name: node.name
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.name
+
+            # cluster.name: Shared cluster name from ConfigMap.
+            # All nodes must use the same cluster name to join.
             - name: cluster.name
               valueFrom:
                 configMapKeyRef:
                   name: elasticsearch-config
                   key: cluster.name
+
+            # node.roles: Comma-separated list of roles for this node.
+            # "master" = cluster management, "data" = store shards.
             - name: node.roles
               value: "master,data"
+
+            # discovery.seed_hosts: DNS names that this node uses to find
+            # other nodes in the cluster. The headless service provides
+            # DNS resolution: es-master-data-0.es-master-data → pod IP.
             - name: discovery.seed_hosts
               value: "es-master-data-0.es-master-data"
+
+            # network.publish_host: The IP address that this node advertises
+            # to other nodes for transport communication. Must be the pod's
+            # routable IP (not localhost or the node IP).
             - name: network.publish_host
               valueFrom:
                 fieldRef:
                   fieldPath: status.podIP
+
+            # cluster.initial_master_nodes: List of nodes that will participate
+            # in the initial master election during cluster bootstrap. This is
+            # only needed on the VERY FIRST start. Once the cluster is formed,
+            # this setting is ignored.
             - name: cluster.initial_master_nodes
               value: "es-master-data-0"
+
+            # ELASTIC_PASSWORD: The password for the 'elastic' superuser.
+            # ES 8.x normally generates a random password at first boot, but
+            # setting this environment variable overrides that with our managed
+            # password from Vault (synced via External Secrets Operator).
             - name: ELASTIC_PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: elastic-credentials
                   key: elastic-password
+
+            # ES_JAVA_OPTS: JVM heap settings for Elasticsearch.
+            # -Xms256m = initial heap size (256 MB)
+            # -Xmx256m = maximum heap size (256 MB)
+            # -XX:+AlwaysPreTouch = pre-commit all heap pages at startup
+            #   (improves performance but increases RSS — acceptable for
+            #    master-data with 1Gi limit, but NOT for ingest with 192m heap)
             - name: ES_JAVA_OPTS
               value: "-Xms256m -Xmx256m -XX:+AlwaysPreTouch"
+
+            # -------------------------------------------------------------------
+            # Security Settings (xpack.security)
+            # -------------------------------------------------------------------
+            # Elasticsearch 8.x has security enabled by default. These settings
+            # configure TLS for both HTTP (REST API) and Transport (inter-node).
+            # -------------------------------------------------------------------
+
+            # Enable Elasticsearch security features
             - name: xpack.security.enabled
               value: "true"
+
+            # License type: "basic" is free and includes security features
             - name: xpack.license.self_generated.type
               value: "basic"
+
+            # --- HTTP TLS (for REST API over HTTPS) ---
+            # Clients (Kibana, curl) connect to port 9200 over HTTPS
             - name: xpack.security.http.ssl.enabled
               value: "true"
             - name: xpack.security.http.ssl.key
@@ -98,8 +236,12 @@ spec:
               value: /usr/share/elasticsearch/config/certs/es.crt
             - name: xpack.security.http.ssl.certificate_authorities
               value: /usr/share/elasticsearch/config/certs/ca.crt
+            # "certificate" mode: validates that the client presents a cert
+            # signed by our CA, but does not require client certs for HTTP
             - name: xpack.security.http.ssl.verification_mode
               value: certificate
+
+            # --- Transport TLS (for inter-node communication over port 9300) ---
             - name: xpack.security.transport.ssl.enabled
               value: "true"
             - name: xpack.security.transport.ssl.key
@@ -110,8 +252,14 @@ spec:
               value: /usr/share/elasticsearch/config/certs/ca.crt
             - name: xpack.security.transport.ssl.verification_mode
               value: certificate
+            # "required" mode: BOTH sides must present valid certificates
+            # (mutual TLS). This is the most secure mode for inter-node comms.
             - name: xpack.security.transport.ssl.client_authentication
               value: "required"
+
+            # -------------------------------------------------------------------
+            # Feature Toggles — disable features we don't need to save RAM
+            # -------------------------------------------------------------------
             - name: xpack.ml.enabled
               value: "false"
             - name: xpack.watcher.enabled
@@ -120,15 +268,44 @@ spec:
               value: "false"
             - name: xpack.profiling.enabled
               value: "false"
+
+          # -------------------------------------------------------------------
+          # Readiness Probe
+          # -------------------------------------------------------------------
+          # Checks if the node is ready to accept traffic. The probe runs
+          # curl against the local HTTPS endpoint and expects HTTP 401
+          # (Unauthorized) — which means the security layer is up and the
+          # node is ready to authenticate requests.
+          #
+          # ES can take 2-3 minutes to start with minimal heap (256m). The
+          # probe has generous timeouts to avoid false failures.
+          #
+          # Note: We check for 401 (not 200) because the readiness probe
+          # doesn't supply credentials. Getting 401 means the HTTP layer is
+          # working — clients can authenticate and get 200.
+          # -------------------------------------------------------------------
           readinessProbe:
             exec:
               command:
                 - bash
                 - -c
                 - curl -sk https://localhost:9200 -o /dev/null -w "%{http_code}" | grep -q "401"
-            initialDelaySeconds: 15
-            periodSeconds: 5
-            failureThreshold: 60
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 30
+
+          # -------------------------------------------------------------------
+          # Resource Requests & Limits
+          # -------------------------------------------------------------------
+          # Requests: guaranteed minimum — Kubernetes schedules pods only if
+          #           the node has at least this much free resources.
+          # Limits:   maximum — pod is throttled (CPU) or OOMKilled (memory)
+          #           if it exceeds this.
+          #
+          # Master+data needs more resources than ingest because it manages
+          # cluster state AND stores data.
+          # -------------------------------------------------------------------
           resources:
             requests:
               memory: "512Mi"
@@ -136,19 +313,64 @@ spec:
             limits:
               memory: "1Gi"
               cpu: "300m"
+
+          # -------------------------------------------------------------------
+          # Volume Mounts
+          # -------------------------------------------------------------------
           volumeMounts:
+            # Persistent data storage (mounted from the PVC created by
+            # volumeClaimTemplates below)
             - name: elasticsearch-data
               mountPath: /usr/share/elasticsearch/data
+            # TLS certificates (copied by prepare-certs init container)
             - name: es-certs-dir
               mountPath: /usr/share/elasticsearch/config/certs
+
+      # terminationGracePeriodSeconds: Time Kubernetes waits for the pod
+      # to shut down gracefully before force-killing it. ES needs time to:
+      #   1. Move shards to other nodes
+      #   2. Step down as master (if it was the master)
+      #   3. Flush transaction logs
       terminationGracePeriodSeconds: 120
+
+      # -----------------------------------------------------------------------
+      # Volumes (non-persistent)
+      # -----------------------------------------------------------------------
       volumes:
+        # elastic-certs: A Kubernetes Secret containing the TLS certificate,
+        # key, and CA cert. This Secret was created by cert-manager from the
+        # es-node Certificate resource (certificate.yaml).
         - name: elastic-certs
           secret:
             secretName: elastic-certs
             defaultMode: 0600
+        # es-certs-dir: An emptyDir volume (ephemeral, tied to pod lifetime)
+        # that the prepare-certs init container copies certs into with
+        # correct ownership (UID 1000, mode 640).
         - name: es-certs-dir
           emptyDir: {}
+
+  # ---------------------------------------------------------------------------
+  # volumeClaimTemplates: Persistent Storage for StatefulSet
+  # ---------------------------------------------------------------------------
+  # This is the key difference between StatefulSet and Deployment.
+  # Each replica gets its OWN PVC created from this template:
+  #   - Replica 0 → PVC "elasticsearch-data-es-master-data-0"
+  #   - Replica 1 → PVC "elasticsearch-data-es-master-data-1"
+  #
+  # These PVCs persist even if the pod is deleted. When a new pod is created
+  # with the same name, it reuses the same PVC and gets its data back.
+  #
+  # Storage Class: openebs-hostpath
+  #   OpenEBS LocalPV creates a hostPath volume on the node where the pod
+  #   is scheduled. No network storage is involved — the pod writes directly
+  #   to the node's local filesystem (/var/openebs/local).
+  #
+  # Volume Binding Mode: WaitForFirstConsumer
+  #   The PVC is NOT created until a pod claims it. The PV is then created
+  #   on the SAME node as the pod. This ensures data locality and avoids
+  #   "stuck pending" PVCs.
+  # ---------------------------------------------------------------------------
   volumeClaimTemplates:
     - metadata:
         name: elasticsearch-data
@@ -158,4 +380,4 @@ spec:
         resources:
           requests:
             storage: 1Gi
-        storageClassName: longhorn
+        storageClassName: openebs-hostpath
