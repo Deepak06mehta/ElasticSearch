@@ -1,0 +1,120 @@
+# =============================================================================
+# Bootstrap Job: elastic-bootstrap
+# Runs BEFORE the StatefulSet. Generates a self-signed CA and per-node TLS
+# certificates using elasticsearch-certutil, then stores them in a k8s Secret
+# named "elastic-certs".
+#
+# Two containers share an emptyDir volume:
+#   1. cert-generator — creates CA + node certs, writes to /shared
+#   2. secret-creator — reads /shared and creates the k8s Secret
+# =============================================================================
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: elastic-bootstrap
+  namespace: elk
+spec:
+  template:
+    spec:
+      # ServiceAccount with RBAC to create/delete Secrets (see rbac.yaml).
+      serviceAccountName: elastic-bootstrap
+      # If the pod fails, Kubernetes retries (instead of the default Never).
+      restartPolicy: OnFailure
+      containers:
+        # --- Container 1: cert-generator -------------------------------------
+        # Uses the official ES image (has elasticsearch-certutil).
+        - name: cert-generator
+          image: docker.elastic.co/elasticsearch/elasticsearch:8.15.5
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -e
+
+              echo "Generate CA and node certs with elasticsearch-certutil"
+
+              # Step 1: Create a self-signed Certificate Authority (PEM format).
+              # --pass "" means no password on the CA key (required for non-interactive use).
+              elasticsearch-certutil ca --silent --pem --out /tmp/ca.zip --pass ""
+              unzip -o /tmp/ca.zip -d /tmp/certs/
+
+              # Step 2: Define per-node certificate requests (instances.yml).
+              # Each node gets its own cert with DNS SANs for:
+              #   - <node>.<service>          (e.g. elasticsearch-0.elasticsearch)
+              #   - <node>.<service>.<ns>     (FQDN)
+              #   - localhost / 127.0.0.1     (for local health checks)
+              #   - elasticsearch             (service-level DNS for Kibana)
+              printf '%s\n' > /tmp/certs/instances.yml \
+                'instances:' \
+                '  - name: elasticsearch-0' \
+                '    dns:' \
+                '      - elasticsearch' \
+                '      - elasticsearch.elk.svc.cluster.local' \
+                '      - elasticsearch-0.elasticsearch' \
+                '      - elasticsearch-0.elasticsearch.elk.svc.cluster.local' \
+                '      - localhost' \
+                '    ip:' \
+                '      - 127.0.0.1' \
+                '  - name: elasticsearch-1' \
+                '    dns:' \
+                '      - elasticsearch' \
+                '      - elasticsearch.elk.svc.cluster.local' \
+                '      - elasticsearch-1.elasticsearch' \
+                '      - elasticsearch-1.elasticsearch.elk.svc.cluster.local' \
+                '      - localhost' \
+                '    ip:' \
+                '      - 127.0.0.1'
+
+              # Step 3: Generate per-node certs signed by the CA.
+              elasticsearch-certutil cert --silent --pem --out /tmp/certs/certs.zip \
+                --in /tmp/certs/instances.yml \
+                --ca-cert /tmp/certs/ca/ca.crt \
+                --ca-key /tmp/certs/ca/ca.key
+              unzip -o /tmp/certs/certs.zip -d /tmp/certs/
+
+              # Step 4: Copy all cert files to the shared emptyDir volume.
+              cp /tmp/certs/ca/ca.crt /shared/ca.crt
+              cp /tmp/certs/ca/ca.key /shared/ca.key
+              cp /tmp/certs/elasticsearch-0/elasticsearch-0.crt /shared/elasticsearch-0.crt
+              cp /tmp/certs/elasticsearch-0/elasticsearch-0.key /shared/elasticsearch-0.key
+              cp /tmp/certs/elasticsearch-1/elasticsearch-1.crt /shared/elasticsearch-1.crt
+              cp /tmp/certs/elasticsearch-1/elasticsearch-1.key /shared/elasticsearch-1.key
+
+              echo "Cert generation complete"
+          volumeMounts:
+            - name: shared-certs
+              mountPath: /shared
+
+        # --- Container 2: secret-creator -------------------------------------
+        # Uses bitnami/kubectl (lightweight image with kubectl binary).
+        # Creates the elastic-certs Secret from the cert files in /shared.
+        - name: secret-creator
+          image: bitnami/kubectl:latest
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -e
+
+              echo "Create/update elastic-certs secret"
+
+              # Delete first so --ignore-not-found allows re-creating.
+              kubectl delete secret elastic-certs -n elk --ignore-not-found
+
+              # Create the Secret with all cert files as key-value entries.
+              kubectl create secret generic elastic-certs -n elk \
+                --from-file=/shared/ca.crt \
+                --from-file=/shared/ca.key \
+                --from-file=/shared/elasticsearch-0.crt \
+                --from-file=/shared/elasticsearch-0.key \
+                --from-file=/shared/elasticsearch-1.crt \
+                --from-file=/shared/elasticsearch-1.key
+
+              echo "Secret created"
+          volumeMounts:
+            - name: shared-certs
+              mountPath: /shared
+
+      # --- Volumes -----------------------------------------------------------
+      volumes:
+        # emptyDir ephemeral volume shared between the two containers.
+        - name: shared-certs
+          emptyDir: {}

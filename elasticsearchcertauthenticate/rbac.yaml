@@ -1,0 +1,44 @@
+# =============================================================================
+# RBAC: bootstrap-job permissions
+# The bootstrap job runs two containers — one that generates TLS certs
+# and one that creates the elastic-certs Secret in k8s. This second
+# container needs RBAC permissions to create/delete Secrets.
+# =============================================================================
+
+# --- ServiceAccount -----------------------------------------------------------
+# The bootstrap pod runs under this ServiceAccount.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: elastic-bootstrap
+  namespace: elk
+---
+# --- Role ---------------------------------------------------------------------
+# Grants permission to manage Secrets in the elk namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: elastic-bootstrap
+  namespace: elk
+rules:
+  # Core API group (""), resource "secrets"
+  - apiGroups: [""]
+    resources: ["secrets"]
+    # The bootstrap job needs all these verbs because it does:
+    # get (check existence), create (first time), delete (replace), update/patch
+    verbs: ["get", "create", "update", "patch", "delete"]
+---
+# --- RoleBinding --------------------------------------------------------------
+# Binds the ServiceAccount to the Role.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: elastic-bootstrap
+  namespace: elk
+subjects:
+  - kind: ServiceAccount
+    name: elastic-bootstrap
+roleRef:
+  kind: Role
+  name: elastic-bootstrap
+  apiGroup: rbac.authorization.k8s.io

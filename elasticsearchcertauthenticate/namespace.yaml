@@ -1,0 +1,9 @@
+# =============================================================================
+# Namespace: elk
+# All Elasticsearch + Kibana resources are scoped to this namespace.
+# Deleting this namespace removes the entire deployment.
+# =============================================================================
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: elk

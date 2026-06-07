@@ -1,0 +1,70 @@
+# =============================================================================
+# Deployment: kibana
+# A single-replica Kibana connected to the Elasticsearch cluster over HTTPS
+# with the kibana_system credentials.
+#
+# Kibana is deployed AFTER the set-password-job completes, and then restarted
+# once (Phase 5 in deploy.sh) to ensure it picks up the fresh credentials
+# before any monitoring uploads.
+# =============================================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kibana
+  namespace: elk
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kibana
+  template:
+    metadata:
+      labels:
+        app: kibana
+    spec:
+      # --- Volumes (shared across all containers) ----------------------------
+      volumes:
+        # Mount the CA certificate from the elastic-certs Secret so Kibana
+        # can verify ES's TLS certificate when connecting.
+        - name: elastic-certs
+          secret:
+            secretName: elastic-certs
+            items:
+              - key: ca.crt
+                path: ca.crt
+
+      containers:
+        - name: kibana
+          image: docker.elastic.co/kibana/kibana:8.15.5
+          ports:
+            - containerPort: 5601
+
+          env:
+            # The hostname Kibana advertises (set to "kibana").
+            - name: SERVERNAME
+              value: kibana
+
+            # Elasticsearch endpoint — uses the headless Service DNS name.
+            # Port 9200 is the ES HTTP API.
+            - name: ELASTICSEARCH_HOSTS
+              value: "https://elasticsearch:9200"
+
+            # Authenticate as the built-in kibana_system user.
+            - name: ELASTICSEARCH_USERNAME
+              value: "kibana_system"
+
+            # Password from the elastic-credentials secret.
+            - name: ELASTICSEARCH_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: elastic-credentials
+                  key: kibana-password
+
+            # Path to the CA cert for verifying ES's TLS certificate.
+            - name: ELASTICSEARCH_SSL_CERTIFICATEAUTHORITIES
+              value: config/certs/ca.crt
+
+          volumeMounts:
+            - name: elastic-certs
+              mountPath: /usr/share/kibana/config/certs
+              readOnly: true

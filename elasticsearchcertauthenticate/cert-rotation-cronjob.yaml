@@ -1,0 +1,27 @@
+# =============================================================================
+# CronJob: elastic-cert-rotation
+# Placeholder for automatic TLS certificate rotation.
+# Currently only logs a message. The actual implementation would:
+#   1. Re-run the cert generation logic from bootstrap-job.yaml.
+#   2. Update the elastic-certs Secret.
+#   3. Trigger a rolling restart of the StatefulSet and Kibana Deployment.
+#
+# Schedule: "0 0 1 * *"  →  midnight on the 1st of every month.
+# =============================================================================
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: elastic-cert-rotation
+  namespace: elk
+spec:
+  schedule: "0 0 1 * *"
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: rotate
+              image: docker.elastic.co/elasticsearch/elasticsearch:8.15.5
+              # TODO: implement actual cert rotation logic.
+              command: ["/bin/bash", "-c", "echo rotate certs"]

@@ -1,0 +1,13 @@
+# =============================================================================
+# ConfigMap: elasticsearch-config
+# Reserved for cluster-wide ES configuration. Currently minimal because most
+# settings are passed as env vars in the StatefulSet.
+# =============================================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: elasticsearch-config
+  namespace: elk
+data:
+  # The cluster name used by Elasticsearch nodes to form a cluster.
+  cluster.name: minikube-es

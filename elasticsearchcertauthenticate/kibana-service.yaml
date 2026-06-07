@@ -1,0 +1,25 @@
+# =============================================================================
+# Service: kibana
+# NodePort service exposing Kibana's web UI on a high-numbered port.
+# 
+# Access methods:
+#   - Port-forward: kubectl port-forward -n elk svc/kibana 5601:5601
+#   - NodePort:     minikube service kibana -n elk
+# =============================================================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: kibana
+  namespace: elk
+spec:
+  # NodePort exposes the service on every minikube node at a port >= 30000.
+  type: NodePort
+
+  # Route traffic to pods with the "app: kibana" label.
+  selector:
+    app: kibana
+
+  ports:
+    # Standard Kibana HTTP port.
+    - port: 5601
+      targetPort: 5601

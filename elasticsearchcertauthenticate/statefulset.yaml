@@ -1,0 +1,286 @@
+# =============================================================================
+# StatefulSet: elasticsearch
+# The core Elasticsearch cluster — 2 replicas, each with persistent storage
+# and TLS certificates from the bootstrap job.
+#
+# Key design decisions:
+#   - StatefulSet (not Deployment) — stable network identities & ordered rolling.
+#   - Headless Service (elasticsearch) — DNS-based peer discovery.
+#   - Init containers — fix permissions, copy per-node certs.
+#   - OrderedReady pod management — pod-0 starts before pod-1.
+#   - Resources: memory request 1Gi / limit 2Gi (prevents OOM with 512m heap).
+# =============================================================================
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: elasticsearch
+  namespace: elk
+
+spec:
+  # Must match the headless Service name so pods get DNS entries.
+  serviceName: elasticsearch
+  # Two nodes — enough for a highly-available cluster with replicas.
+  replicas: 2
+
+  # Match labels to identify which pods belong to this StatefulSet.
+  selector:
+    matchLabels:
+      app: elasticsearch
+
+  template:
+    metadata:
+      labels:
+        app: elasticsearch
+
+    spec:
+      # All ES processes run as UID 1000 (elasticsearch user in the image).
+      # The fsGroup ensures the mounted volume is writable by GID 0.
+      securityContext:
+        fsGroup: 1000
+
+      # --- Topology Spread Constraints ---------------------------------------
+      # Try to schedule pods on different minikube nodes for fault tolerance.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: elasticsearch
+
+      # --- Pod Anti-Affinity -------------------------------------------------
+      # Soft preference to avoid co-locating both ES pods on the same node.
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: elasticsearch
+                topologyKey: "kubernetes.io/hostname"
+
+      # --- Init Containers ---------------------------------------------------
+      # Run before the main elasticsearch container starts.
+      initContainers:
+        # --- fix-permissions -------------------------------------------------
+        # Ensures the data directory exists and is owned by UID 1000.
+        # Also wipes any stale data (minikube hostPath does not clean up on PVC
+        # deletion, which would cause cluster UUID conflicts on redeploy).
+        - name: fix-permissions
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              # Wipe ALL existing data (visible + hidden files).
+              # This prevents stale cluster state from a previous deployment.
+              # Safe because with OrderedReady the other node holds the cluster
+              # state and data is replicated back after this pod restarts.
+              rm -rf /usr/share/elasticsearch/data/* /usr/share/elasticsearch/data/.* 2>/dev/null || true
+              mkdir -p /usr/share/elasticsearch/data
+              chown -R 1000:0 /usr/share/elasticsearch/data
+              chmod -R 775 /usr/share/elasticsearch/data
+          volumeMounts:
+            - name: elasticsearch-data
+              mountPath: /usr/share/elasticsearch/data
+
+        # --- copy-certs ------------------------------------------------------
+        # Copies the correct per-node certificate and key from the shared
+        # elastic-certs Secret into the pod's local cert directory.
+        # Uses $(hostname) to pick elasticsearch-0.crt or elasticsearch-1.crt.
+        - name: copy-certs
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              NODE_NAME=$(hostname)
+              cp /certs-secret/ca.crt /elastic-certs/ca.crt
+              cp /certs-secret/${NODE_NAME}.crt /elastic-certs/es.crt
+              cp /certs-secret/${NODE_NAME}.key /elastic-certs/es.key
+              chmod 640 /elastic-certs/*
+              chown 1000:0 /elastic-certs/*
+          volumeMounts:
+            - name: elastic-certs-secret
+              mountPath: /certs-secret
+            - name: elastic-certs
+              mountPath: /elastic-certs
+
+      # --- Main Container: elasticsearch -------------------------------------
+      containers:
+        - name: elasticsearch
+          image: docker.elastic.co/elasticsearch/elasticsearch:8.15.5
+
+          # Run as the elasticsearch user (UID 1000, GID 0).
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 0
+
+          ports:
+            - containerPort: 9200  # HTTP API (REST, Kibana, clients)
+            - containerPort: 9300  # Transport (inter-node communication)
+
+          # --- Environment Variables ------------------------------------------
+          env:
+            # Pod's own name — used by ES as the node name.
+            - name: node.name
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+
+            # All nodes must share the same cluster name to form a cluster.
+            - name: cluster.name
+              value: "elk-cluster"
+
+            # DNS seed hosts for discovery — points to the headless Service.
+            # ES resolves these DNS names to find other nodes.
+            - name: discovery.seed_hosts
+              value: "elasticsearch-0.elasticsearch,elasticsearch-1.elasticsearch"
+
+            # The IP address other nodes should use to reach this pod.
+            - name: network.publish_host
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+
+            # REQUIRED for initial cluster bootstrap (first election).
+            # Lists which nodes are eligible to be elected as the first master.
+            # Once the cluster is formed this setting is ignored (except a warning
+            # on each restart). It is kept here because removing it would make
+            # subsequent fresh deployments unable to bootstrap.
+            - name: cluster.initial_master_nodes
+              value: "elasticsearch-0,elasticsearch-1"
+
+            # The elastic superuser password (from the static secret).
+            # ES honours this on a fresh data directory. If auto-configuration
+            # generates a different password, deploy.sh Phase 2b resets it.
+            - name: ELASTIC_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: elastic-credentials
+                  key: elastic-password
+
+            # JVM heap settings.
+            # -Xms512m -Xmx512m: fixed 512 MB heap (was 256m → GC thrashing).
+            # -XX:+AlwaysPreTouch: commit heap pages at startup (faster
+            #   readiness, no lazy allocation during recovery).
+            - name: ES_JAVA_OPTS
+              value: "-Xms512m -Xmx512m -XX:+AlwaysPreTouch"
+
+            # --- Security: general -------------------------------------------
+            - name: xpack.security.enabled
+              value: "true"
+
+            # Basic license (free, includes security, no ML features).
+            - name: xpack.license.self_generated.type
+              value: "basic"
+
+            # --- Security: HTTP (REST API) TLS --------------------------------
+            # Clients (Kibana, curl) must connect over HTTPS with the CA cert.
+            - name: xpack.security.http.ssl.enabled
+              value: "true"
+            - name: xpack.security.http.ssl.key
+              value: /usr/share/elasticsearch/config/certs/es.key
+            - name: xpack.security.http.ssl.certificate
+              value: /usr/share/elasticsearch/config/certs/es.crt
+            - name: xpack.security.http.ssl.certificate_authorities
+              value: /usr/share/elasticsearch/config/certs/ca.crt
+            - name: xpack.security.http.ssl.verification_mode
+              value: certificate
+
+            # --- Security: Transport TLS --------------------------------------
+            # Inter-node communication is encrypted and mutual-TLS authenticated.
+            - name: xpack.security.transport.ssl.enabled
+              value: "true"
+            - name: xpack.security.transport.ssl.key
+              value: /usr/share/elasticsearch/config/certs/es.key
+            - name: xpack.security.transport.ssl.certificate
+              value: /usr/share/elasticsearch/config/certs/es.crt
+            - name: xpack.security.transport.ssl.certificate_authorities
+              value: /usr/share/elasticsearch/config/certs/ca.crt
+            - name: xpack.security.transport.ssl.verification_mode
+              value: certificate
+            # Require the other node to present a valid certificate.
+            - name: xpack.security.transport.ssl.client_authentication
+              value: "required"
+
+            # --- Feature toggles (disable to save memory) --------------------
+            # These consume significant memory — disabled since they are
+            # not needed for this deployment and we are on a tight budget.
+            - name: xpack.ml.enabled
+              value: "false"
+            - name: xpack.watcher.enabled
+              value: "false"
+            - name: xpack.monitoring.collection.enabled
+              value: "false"
+            - name: xpack.profiling.enabled
+              value: "false"
+
+          # --- Readiness Probe ------------------------------------------------
+          # Checks that the HTTPS endpoint is accepting requests by expecting
+          # an HTTP 401 (Unauthorized). 401 proves the node is up, TLS works,
+          # and security is active — without needing a password for the probe.
+          # initialDelaySeconds: 15 (wait 15s before first probe)
+          # periodSeconds: 5 (probe every 5s)
+          # failureThreshold: 60 (allow up to 60 failures = 5 min of trying)
+          readinessProbe:
+            exec:
+              command:
+                - bash
+                - -c
+                - curl -sk https://localhost:9200 -o /dev/null -w "%{http_code}" | grep -q "401"
+            initialDelaySeconds: 15
+            periodSeconds: 5
+            failureThreshold: 60
+
+          # --- Resource Limits ------------------------------------------------
+          # Memory: 512m heap + AlwaysPreTouch + JVM overhead (~300-400m)
+          #   = ~800-900m baseline. During recovery it spikes higher.
+          #   Request 1Gi, limit 2Gi prevents OOMKilled (exit 137).
+          # CPU: 250m request / 500m limit — enough for 2 nodes on minikube.
+          resources:
+            requests:
+              memory: "1Gi"
+              cpu: "250m"
+            limits:
+              memory: "2Gi"
+              cpu: "500m"
+
+          # --- Volume Mounts --------------------------------------------------
+          volumeMounts:
+            # Persistent data directory (from volumeClaimTemplates below).
+            - name: elasticsearch-data
+              mountPath: /usr/share/elasticsearch/data
+            # Certificate files (from the copy-certs init container).
+            - name: elastic-certs
+              mountPath: /usr/share/elasticsearch/config/certs
+
+      # Allow up to 2 minutes for ES to shut down gracefully (flush data, leave cluster).
+      terminationGracePeriodSeconds: 120
+
+      # --- Volumes (pod-level, not persistent) --------------------------------
+      volumes:
+        # Reference to the elastic-certs Secret created by the bootstrap job.
+        - name: elastic-certs-secret
+          secret:
+            secretName: elastic-certs
+            defaultMode: 0600  # Only owner (root) can read — ES runs as UID 1000
+        # EmptyDir where the copy-certs init container places the per-node cert.
+        - name: elastic-certs
+          emptyDir: {}
+
+  # --- Persistent Storage ----------------------------------------------------
+  # Each pod gets its own PersistentVolumeClaim named:
+  #   elasticsearch-data-<statefulset-name>-<ordinal>
+  # e.g. elasticsearch-data-elasticsearch-0
+  # The StorageClass default (hostPath on minikube) provides 1 GiB each.
+  volumeClaimTemplates:
+    - metadata:
+        name: elasticsearch-data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 1Gi

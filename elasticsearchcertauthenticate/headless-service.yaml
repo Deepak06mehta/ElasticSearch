@@ -1,0 +1,27 @@
+# =============================================================================
+# Headless Service: elasticsearch
+# A headless Service (clusterIP: None) enables DNS-based peer discovery.
+# Each pod resolves as <pod-name>.<service-name>.<namespace>.svc.cluster.local
+# e.g. elasticsearch-0.elasticsearch.elk.svc.cluster.local
+#
+# IMPORTANT: publishNotReadyAddresses is NOT set (defaults to false).
+# This ensures DNS only returns IPs of Ready pods, working correctly with
+# the StatefulSet's OrderedReady pod management policy.
+# =============================================================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: elasticsearch
+  namespace: elk
+spec:
+  # Headless — no ClusterIP load balancer, DNS returns pod IPs directly.
+  clusterIP: None
+  selector:
+    app: elasticsearch
+  ports:
+    # HTTP port — Kibana and clients connect here.
+    - name: http
+      port: 9200
+    # Transport port — inter-node communication (cluster discovery, shard replication).
+    - name: transport
+      port: 9300
