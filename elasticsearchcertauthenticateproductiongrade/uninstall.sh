@@ -25,6 +25,9 @@ kubectl delete pvc -l app=elasticsearch -n elk --ignore-not-found --wait=true --
 log "Remaining PVCs in elk namespace (if any):"
 kubectl get pvc -n elk 2>/dev/null || true
 
+log "Cleaning up any leftover Longhorn PVs..."
+kubectl delete pv -l app.kubernetes.io/instance=longhorn --ignore-not-found --wait=true --timeout=1m 2>/dev/null || true
+
 # Phase 2: Remove Kibana
 log "Removing Kibana..."
 kubectl delete deployment kibana -n elk --ignore-not-found --wait=true --timeout=2m 2>/dev/null || true

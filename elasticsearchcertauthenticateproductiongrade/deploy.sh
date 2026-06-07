@@ -49,12 +49,12 @@ helm repo add jetstack https://charts.jetstack.io --force-update
 helm upgrade --install cert-manager jetstack/cert-manager \
   --namespace cert-manager --create-namespace \
   --set installCRDs=true \
-  --set resources.requests.memory=128Mi \
-  --set resources.limits.memory=256Mi \
-  --set webhook.resources.requests.memory=64Mi \
-  --set webhook.resources.limits.memory=128Mi \
-  --set cainjector.resources.requests.memory=64Mi \
-  --set cainjector.resources.limits.memory=128Mi \
+  --set resources.requests.memory=64Mi \
+  --set resources.limits.memory=128Mi \
+  --set webhook.resources.requests.memory=32Mi \
+  --set webhook.resources.limits.memory=64Mi \
+  --set cainjector.resources.requests.memory=32Mi \
+  --set cainjector.resources.limits.memory=64Mi \
   --wait --timeout=3m
 log "cert-manager installed"
 
@@ -93,8 +93,8 @@ log "============================================"
 helm repo add external-secrets https://charts.external-secrets.io --force-update
 helm upgrade --install external-secrets external-secrets/external-secrets \
   --namespace external-secrets --create-namespace \
-  --set resources.requests.memory=64Mi \
-  --set resources.limits.memory=128Mi \
+  --set resources.requests.memory=32Mi \
+  --set resources.limits.memory=64Mi \
   --wait --timeout=3m
 log "External Secrets Operator installed"
 
@@ -124,6 +124,12 @@ helm repo add longhorn https://charts.longhorn.io --force-update
 helm upgrade --install longhorn longhorn/longhorn \
   --namespace longhorn-system --create-namespace \
   --values "${BASE_DIR}/longhorn/values.yaml" \
+  --set longhornManager.resources.requests.memory=64Mi \
+  --set longhornManager.resources.limits.memory=128Mi \
+  --set instanceManager.resources.requests.memory=64Mi \
+  --set instanceManager.resources.limits.memory=128Mi \
+  --set engineImage.resources.requests.memory=64Mi \
+  --set engineImage.resources.limits.memory=128Mi \
   --wait --timeout=5m
 log "Longhorn installed with numberOfReplicas: 1"
 

@@ -17,24 +17,24 @@ csi:
 longhornManager:
   resources:
     requests:
-      memory: 128Mi
-      cpu: 50m
+      memory: 64Mi
+      cpu: 25m
     limits:
-      memory: 256Mi
-      cpu: 200m
+      memory: 128Mi
+      cpu: 100m
 instanceManager:
   resources:
     requests:
-      memory: 128Mi
-      cpu: 50m
+      memory: 64Mi
+      cpu: 25m
     limits:
-      memory: 256Mi
-      cpu: 200m
+      memory: 128Mi
+      cpu: 100m
 engineImage:
   resources:
     requests:
-      memory: 128Mi
-      cpu: 50m
+      memory: 64Mi
+      cpu: 25m
     limits:
-      memory: 256Mi
-      cpu: 200m
+      memory: 128Mi
+      cpu: 100m

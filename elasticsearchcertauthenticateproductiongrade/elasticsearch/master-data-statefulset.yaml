@@ -85,7 +85,7 @@ spec:
                   name: elastic-credentials
                   key: elastic-password
             - name: ES_JAVA_OPTS
-              value: "-Xms512m -Xmx512m -XX:+AlwaysPreTouch"
+              value: "-Xms256m -Xmx256m -XX:+AlwaysPreTouch"
             - name: xpack.security.enabled
               value: "true"
             - name: xpack.license.self_generated.type
@@ -131,11 +131,11 @@ spec:
             failureThreshold: 60
           resources:
             requests:
-              memory: "1Gi"
-              cpu: "250m"
+              memory: "512Mi"
+              cpu: "150m"
             limits:
-              memory: "2Gi"
-              cpu: "500m"
+              memory: "1Gi"
+              cpu: "300m"
           volumeMounts:
             - name: elasticsearch-data
               mountPath: /usr/share/elasticsearch/data
@@ -157,5 +157,5 @@ spec:
           - ReadWriteOnce
         resources:
           requests:
-            storage: 5Gi
+            storage: 1Gi
         storageClassName: longhorn

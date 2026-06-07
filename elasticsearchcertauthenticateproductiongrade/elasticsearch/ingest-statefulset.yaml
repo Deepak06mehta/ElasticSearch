@@ -70,7 +70,7 @@ spec:
                   name: elastic-credentials
                   key: elastic-password
             - name: ES_JAVA_OPTS
-              value: "-Xms256m -Xmx256m -XX:+AlwaysPreTouch"
+              value: "-Xms192m -Xmx192m -XX:+AlwaysPreTouch"
             - name: xpack.security.enabled
               value: "true"
             - name: xpack.license.self_generated.type
@@ -116,15 +116,15 @@ spec:
             failureThreshold: 60
           resources:
             requests:
-              memory: "512Mi"
-              cpu: "150m"
+              memory: "256Mi"
+              cpu: "100m"
             limits:
-              memory: "1Gi"
-              cpu: "300m"
+              memory: "512Mi"
+              cpu: "200m"
           volumeMounts:
             - name: es-certs-dir
               mountPath: /usr/share/elasticsearch/config/certs
-      terminationGracePeriodSeconds: 60
+      terminationGracePeriodSeconds: 30
       volumes:
         - name: elastic-certs
           secret:

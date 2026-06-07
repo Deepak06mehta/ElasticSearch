@@ -3,9 +3,9 @@
 ## Architecture
 
 ```
-Podman VM (12 GB)
+Podman VM (6 GB)
 │
-└── Minikube (2 nodes, 10 GB memory)
+└── Minikube (2 nodes, 4 GB memory)
      │
      ├── Node 1 (minikube) ──────────────────────────────
      │    ├── Control Plane
@@ -19,20 +19,21 @@ Podman VM (12 GB)
           └── Longhorn    (storage, numberOfReplicas: 1)
 ```
 
-### Resource Budget
+### Resource Budget (Optimized)
 
-| Component | RAM |
-|-----------|-----|
-| Minikube Control Plane | ~1 GB |
-| Elasticsearch Master+Data | ~1.5 GB |
-| Elasticsearch Ingest | ~1 GB |
-| Vault | ~0.5 GB |
-| cert-manager | ~0.2 GB |
-| Kibana | ~0.7 GB |
-| Longhorn | ~1.5 GB |
-| **Total** | **~8.4 GB** |
+| Component | RAM (Request / Limit) |
+|-----------|----------------------|
+| Minikube Control Plane | ~700 MB |
+| Elasticsearch Master+Data | 512 Mi / 1 Gi |
+| Elasticsearch Ingest | 256 Mi / 512 Mi |
+| Vault | 128 Mi / 256 Mi |
+| cert-manager | 64 Mi / 128 Mi |
+| Kibana | 256 Mi / 512 Mi |
+| Longhorn | 192 Mi / 384 Mi (3 components) |
+| External Secrets Operator | 32 Mi / 64 Mi |
+| **Total (requests/limits)** | **~2.1 Gi / ~3.8 Gi** |
 
-Fits comfortably within 10 GB allocated to Minikube (12 GB Podman VM).
+Fits comfortably within 4 GB allocated to Minikube (down from original 10 GB, saving ~6 GB).
 
 ---
 
@@ -44,7 +45,7 @@ Fits comfortably within 10 GB allocated to Minikube (12 GB Podman VM).
 | Secrets storage | Static `secrets.yaml` with hardcoded passwords | **Vault** (KV v2) + **External Secrets Operator** syncs to k8s Secrets |
 | Elasticsearch roles | 2x master+data (StatefulSet, 2 replicas) | **master+data** on Node 1, **ingest** on Node 2 (separate StatefulSets) |
 | Storage | hostPath provisioner (node-local, lost on node failure) | **Longhorn** (replicated, persistent, numberOfReplicas=1 for dev) |
-| Memory efficiency | 2 identical nodes with 512m heap each | Master+data: 512m heap. Ingest: 256m heap. Total ~768m savings |
+| Memory efficiency | 2 identical nodes with 512m heap each | Master+data: 256m heap. Ingest: 192m heap. Total ~1 Gi savings |
 | Node topology | Random scheduling | Explicit **nodeSelector** labels enforce architecture layout |
 
 ---
@@ -52,17 +53,16 @@ Fits comfortably within 10 GB allocated to Minikube (12 GB Podman VM).
 ## Prerequisites
 
 ```bash
-# Podman VM with 12 GB RAM (or bare metal with sufficient resources)
-# Start Minikube with 2 nodes:
+# Start Minikube with 2 nodes (4 GB RAM is sufficient for the optimized setup):
 minikube stop
 minikube delete --all --purge
 
 minikube start \
   --driver=podman \
   --nodes=2 \
-  --cpus=6 \
-  --memory=10240 \
-  --disk-size=50g \
+  --cpus=4 \
+  --memory=4096 \
+  --disk-size=20g \
   --kubernetes-version=v1.35.1
 
 minikube addons enable metrics-server
@@ -241,7 +241,7 @@ kubectl describe pod -n elk <pod-name> | grep -E "Reason:|Exit Code:|State:"
 kubectl logs -n elk <pod-name> --tail 30
 ```
 
-Exit 137 = OOM → increase memory limits.
+Exit 137 = OOM → check `kubectl top pod -n elk` and increase memory limits if needed (defaults are tuned for minimum resource usage).
 Exit 1 = process error → check logs.
 
 ### Elasticsearch not forming cluster
