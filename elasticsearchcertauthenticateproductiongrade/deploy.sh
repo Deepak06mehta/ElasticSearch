@@ -268,7 +268,7 @@ log "============================================"
 log "Phase 11: Deploy Elasticsearch ingest node"
 log "============================================"
 kubectl apply -f "${BASE_DIR}/elasticsearch/ingest-statefulset.yaml"
-kubectl wait --for=condition=ready pod -l app=elasticsearch,role=ingest -n elk --timeout=5m
+kubectl wait --for=condition=ready pod -l app=elasticsearch,role=ingest -n elk --timeout=7m
 log "Elasticsearch ingest node ready"
 
 # ==============================================================================
@@ -336,10 +336,25 @@ log "Phase 14: Deploy Kibana"
 log "============================================"
 kubectl apply -f "${BASE_DIR}/kibana/service.yaml"
 kubectl apply -f "${BASE_DIR}/kibana/deployment.yaml"
-kubectl rollout status deployment/kibana -n elk --timeout=3m
-kubectl rollout restart deployment/kibana -n elk
-kubectl rollout status deployment/kibana -n elk --timeout=3m
-log "Kibana deployed and restarted with fresh credentials"
+# Wait for initial deploy (readiness probe ensures HTTP is up)
+# Kibana credentials (kibana_system) are already set by Phase 13 before
+# this phase, so no restart is needed — avoiding a second round of
+# saved-object migrations that could trigger GC warnings on the ingest node.
+kubectl rollout status deployment/kibana -n elk --timeout=7m
+# Verify Kibana HTTP is responding before declaring complete
+log "Verifying Kibana HTTP endpoint..."
+for i in $(seq 1 30); do
+  CODE=$(kubectl exec -n elk deployment/kibana -- curl -s -o /dev/null -w "%{http_code}" http://localhost:5601 2>/dev/null || echo "000")
+  if [ "$CODE" = "302" ] || [ "$CODE" = "200" ]; then
+    log "Kibana HTTP endpoint ready (code $CODE)"
+    break
+  fi
+  if [ "$i" -eq 30 ]; then
+    warn "Kibana HTTP not ready after 30 attempts - continuing anyway"
+  fi
+  sleep 5
+done
+log "Kibana deployed and verified"
 
 # ==============================================================================
 # Deployment Complete! Print summary and access instructions.

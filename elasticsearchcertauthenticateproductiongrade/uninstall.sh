@@ -74,6 +74,7 @@ kubectl delete clustersecretstore vault-backend --ignore-not-found 2>/dev/null |
 log "Removing cert-manager resources..."
 kubectl delete certificate es-node -n elk --ignore-not-found 2>/dev/null || true
 kubectl delete certificate es-ca -n elk --ignore-not-found 2>/dev/null || true
+kubectl delete certificate es-ca -n cert-manager --ignore-not-found 2>/dev/null || true
 kubectl delete clusterissuer es-ca-issuer --ignore-not-found 2>/dev/null || true
 kubectl delete clusterissuer selfsigned-issuer --ignore-not-found 2>/dev/null || true
 

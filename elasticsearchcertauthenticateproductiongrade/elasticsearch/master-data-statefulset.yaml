@@ -94,7 +94,6 @@ spec:
             - sh
             - -c
             - |
-              rm -rf /usr/share/elasticsearch/data/* /usr/share/elasticsearch/data/.* 2>/dev/null || true
               mkdir -p /usr/share/elasticsearch/data
               chown -R 1000:0 /usr/share/elasticsearch/data
               chmod -R 775 /usr/share/elasticsearch/data
@@ -282,15 +281,25 @@ spec:
           #
           # Note: We check for 401 (not 200) because the readiness probe
           # doesn't supply credentials. Getting 401 means the HTTP layer is
-          # working — clients can authenticate and get 200.
+          # Readiness Probe
+          # -------------------------------------------------------------------
+          # Uses bash's built-in TCP check on port 9200 (no curl dependency).
+          # This is MUCH faster than curl + TLS handshake — typically <100ms.
+          #
+          # Why not curl? The curl command over TLS can take >15s on this
+          # system (slow cert validation). A simple TCP connect returns in
+          # milliseconds once ES is listening.
+          #
+          # initialDelaySeconds=240: ES takes ~3.5 min to start. 240s covers
+          # the typical startup so you see zero probe failures.
           # -------------------------------------------------------------------
           readinessProbe:
             exec:
               command:
                 - bash
                 - -c
-                - curl -sk https://localhost:9200 -o /dev/null -w "%{http_code}" | grep -q "401"
-            initialDelaySeconds: 30
+                - timeout 5 bash -c 'echo > /dev/tcp/localhost/9200' 2>/dev/null
+            initialDelaySeconds: 300
             periodSeconds: 10
             timeoutSeconds: 5
             failureThreshold: 30
@@ -308,10 +317,10 @@ spec:
           # -------------------------------------------------------------------
           resources:
             requests:
-              memory: "512Mi"
+              memory: "1Gi"
               cpu: "150m"
             limits:
-              memory: "1Gi"
+              memory: "1.5Gi"
               cpu: "300m"
 
           # -------------------------------------------------------------------

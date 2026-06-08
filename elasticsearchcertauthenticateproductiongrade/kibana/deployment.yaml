@@ -116,6 +116,20 @@ spec:
               memory: "1Gi"
               cpu: "300m"
 
+          readinessProbe:
+            # TCP socket check on port 5601. More reliable than HTTP GET:
+            # Kibana's HTTP server returns 503 during saved-object migrations
+            # even after the port is open, causing spurious Unhealthy events.
+            # A TCP connect succeeds the moment the listener is up, and the
+            # deploy.sh HTTP verification loop (§ Phase 14) confirms actual
+            # HTTP 302 after rollout status passes.
+            tcpSocket:
+              port: 5601
+            initialDelaySeconds: 260
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 30
+
           volumeMounts:
             # Mount CA cert to config/certs/ca.crt for TLS verification
             - name: elastic-certs

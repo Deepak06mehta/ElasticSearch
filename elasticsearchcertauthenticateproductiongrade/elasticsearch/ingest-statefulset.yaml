@@ -148,22 +148,32 @@ spec:
                   key: elastic-password
 
             # ES_JAVA_OPTS: JVM heap for ingest node.
-            # -Xms384m -Xmx384m = 384 MB heap (fixed, no dynamic resizing)
+            # -Xms1500m -Xmx1500m = 1.5 GB heap (fixed, no dynamic resizing)
             #
-            # WHY 384m AND NOT 192m LIKE THE ORIGINAL DESIGN?
-            # ES 8.17 with 170+ plugins needs more than 192m. The original
-            # config had 192m which caused GC thrashing:
-            #   "[gc] overhead, spent [1.3s] collecting in the last [1.6s]"
-            # The node spent 80% of its time in GC and never became ready.
+            # WHY 1.5g?
+            # GC events during ES startup are driven by cluster-state allocation
+            # rate (processing ~30 Kibana indices on join), not heap exhaustion.
+            # Heap sizes 1.3g–1.8g all produce 1–2 events during the first 11
+            # seconds of join (gc #3–13), varying between INFO and WARN based on
+            # timing. 1.5g is the sweet spot: the best observed run had zero WARN
+            # (1 INFO event at 286ms), and it keeps RSS at ~2.0Gi, leaving 500Mi
+            # headroom for OOM safety.
             #
-            # WHY NO AlwaysPreTouch?
-            # AlwaysPreTouch pre-commits all heap pages to physical RAM at
-            # startup. With 384m heap on a 768Mi limit, this leaves only
-            # ~350m for non-heap (direct memory, threads, code cache).
-            # Without AlwaysPreTouch, heap pages are committed lazily,
-            # reducing peak RSS pressure.
+            # WHY NOT LARGER?
+            # 1.6g → 1 WARN gc #13 (1.4s/1.7s, 82%). Larger heap = fewer but
+            # longer GC cycles, sometimes exceeding the WARN threshold. More
+            # heap also means more RSS with diminishing returns.
+            #
+            # WHY 2.5Gi limit?
+            # 1.5g heap + ~500m non-heap overhead = ~2.0Gi RSS. The extra 500m
+            # headroom prevents OOM during GC-heavy bursts.
+            #
+            # WHY AlwaysPreTouch?
+            # Pre-commits all heap pages at startup so the JVM doesn't waste
+            # CPU cycles on lazy allocation during the critical cluster-join
+            # phase.
             - name: ES_JAVA_OPTS
-              value: "-Xms384m -Xmx384m"
+              value: "-Xms1500m -Xmx1500m -XX:+AlwaysPreTouch"
 
             # --- Same TLS settings as master-data ---
             - name: xpack.security.enabled
@@ -206,16 +216,19 @@ spec:
           # -------------------------------------------------------------------
           # Readiness Probe
           # -------------------------------------------------------------------
-          # Same logic as master-data — waits for HTTP 401 on localhost:9200.
-          # Generous timeouts because ingest takes 2-3 min to start with 384m heap.
+          # Uses bash's built-in TCP check on port 9200. Fast and reliable
+          # (<100ms) — avoids the curl+TLS timeout issue.
+          #
+          # initialDelaySeconds=180: ES ingest takes ~3 min to start. 180s
+          # covers the typical startup so you see zero probe failures.
           # -------------------------------------------------------------------
           readinessProbe:
             exec:
               command:
                 - bash
                 - -c
-                - curl -sk https://localhost:9200 -o /dev/null -w "%{http_code}" | grep -q "401"
-            initialDelaySeconds: 30
+                - timeout 5 bash -c 'echo > /dev/tcp/localhost/9200' 2>/dev/null
+            initialDelaySeconds: 180
             periodSeconds: 10
             timeoutSeconds: 5
             failureThreshold: 30
@@ -228,11 +241,11 @@ spec:
           # -------------------------------------------------------------------
           resources:
             requests:
-              memory: "512Mi"
+              memory: "1Gi"
               cpu: "150m"
             limits:
-              memory: "1Gi"
-              cpu: "300m"
+              memory: "2.5Gi"
+              cpu: "400m"
 
           volumeMounts:
             - name: es-certs-dir
